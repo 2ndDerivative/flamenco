@@ -1,7 +1,7 @@
 [package]
 name = "flamenco"
 version = "0.1.0"
-authors = ["Niclas Klugmann <klugmann@heggemann.com>"]
+authors = ["Niclas Klugmann <niclas@klugmann.de>"]
 description = "An SMB library"
 edition = "2024"
 
