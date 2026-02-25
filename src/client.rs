@@ -54,7 +54,7 @@ impl Client {
             match Connection::new(self.clone(), socket_addr, server_name.clone())
                 .map(Arc::new)
                 .and_then(|arc| {
-                    register_connection(&server_name, Arc::downgrade(&arc), connections.deref_mut())?;
+                    register_connection(server_name.clone(), Arc::downgrade(&arc), connections.deref_mut())?;
                     Ok(arc)
                 }) {
                 Ok(val) => return Ok(val),
@@ -68,11 +68,11 @@ impl Client {
 }
 
 fn register_connection(
-    server_name: &Arc<ServerName>,
+    server_name: Arc<ServerName>,
     connection: Weak<Connection>,
     s: &mut HashMap<Arc<ServerName>, Weak<Connection>>,
 ) -> std::io::Result<()> {
-    if s.insert(server_name.clone(), connection).is_some() {
+    if s.insert(server_name, connection).is_some() {
         Err(std::io::Error::new(
             std::io::ErrorKind::AddrInUse,
             "Connection to this server already exists",
