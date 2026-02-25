@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     convert::Infallible,
     io::{ErrorKind, Read, Write},
-    net::{SocketAddr, TcpStream, ToSocketAddrs},
+    net::{TcpStream, ToSocketAddrs},
     ops::DerefMut,
     sync::{
         Arc, Mutex, Weak,
@@ -48,7 +48,7 @@ mod tree;
 pub const DEFAULT_PORT: u16 = 445;
 
 impl Connection {
-    fn new(client: Client, addr: impl ToSocketAddrs + Clone) -> std::io::Result<(Connection, SocketAddr)> {
+    fn new(client: Client, addr: impl ToSocketAddrs + Clone) -> std::io::Result<Connection> {
         let tcp = Mutex::new(TcpStream::connect(addr)?);
         let mut lock = tcp.lock().unwrap();
         write_tcp_message(
@@ -78,18 +78,14 @@ impl Connection {
 
         let _response_header = Smb2SyncHeader::read_from(&mut lock.deref_mut())?;
         let response_body = NegotiateResponse::read_from(&mut lock)?;
-        let peer = lock.peer_addr()?;
         drop(lock);
-        Ok((
-            Connection {
-                client,
-                sessions: Mutex::default(),
-                tcp,
-                message_id: AtomicU64::new(1),
-                requires_signing: response_body.is_signing_required(),
-            },
-            peer,
-        ))
+        Ok(Connection {
+            client,
+            sessions: Mutex::default(),
+            tcp,
+            message_id: AtomicU64::new(1),
+            requires_signing: response_body.is_signing_required(),
+        })
     }
 }
 

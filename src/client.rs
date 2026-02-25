@@ -41,9 +41,18 @@ impl Client {
         self.connections.0.lock().unwrap().remove(&con);
     }
     pub fn connect(&self, addr: impl ToSocketAddrs + Clone) -> std::io::Result<Arc<Connection>> {
-        let (con, peer) = Connection::new(self.clone(), addr)?;
-        let con = Arc::new(con);
-        self.register_connection(peer, Arc::downgrade(&con))?;
-        Ok(con)
+        let socket_addr = addr.to_socket_addrs().unwrap().next().unwrap();
+        self.connections
+            .0
+            .lock()
+            .unwrap()
+            .get(&socket_addr)
+            .and_then(|w| w.upgrade())
+            .map(Ok)
+            .unwrap_or_else(|| {
+                let con = Arc::new(Connection::new(self.clone(), socket_addr)?);
+                self.register_connection(socket_addr, Arc::downgrade(&con))?;
+                Ok(con)
+            })
     }
 }
