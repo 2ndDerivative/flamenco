@@ -52,7 +52,7 @@ pub const DEFAULT_PORT: u16 = 445;
 
 impl Connection<'_> {
     fn new(
-        client: Client,
+        client: Client<'_>,
         addr: impl ToSocketAddrs + Clone,
         server_name: Arc<ServerName>,
     ) -> std::io::Result<Connection<'_>> {
