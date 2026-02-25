@@ -48,13 +48,13 @@ impl Smb2ClientMessage for NegotiateRequest {
 
 #[derive(Debug)]
 pub struct NegotiateResponse {
-    security_mode: SecurityMode16,
+    pub security_mode: SecurityMode16,
     dialect_revision: Dialect,
-    server_guid: [u8; 16],
+    pub server_guid: Uuid,
     capabilities: u32,
-    max_transaction_size: u32,
-    max_read_size: u32,
-    max_write_size: u32,
+    pub max_transaction_size: u32,
+    pub max_read_size: u32,
+    pub max_write_size: u32,
     system_time: u64,
     server_start_time: u64,
     security_buffer: Box<[u8]>,
@@ -73,6 +73,7 @@ impl NegotiateResponse {
         let mut _ignored = u16::read_le(&mut r)?;
         let mut server_guid: [u8; 16] = Default::default();
         r.read_exact(&mut server_guid)?;
+        let server_guid = Uuid::from_bytes(server_guid);
         let capabilities = u32::read_le(&mut r)?;
         let max_transaction_size = u32::read_le(&mut r)?;
         let max_read_size = u32::read_le(&mut r)?;
@@ -107,8 +108,5 @@ impl NegotiateResponse {
     }
     pub fn security_buffer(&self) -> Option<&[u8]> {
         (!self.security_buffer.is_empty()).then_some(&self.security_buffer)
-    }
-    pub fn is_signing_required(&self) -> bool {
-        self.security_mode.signing_required()
     }
 }

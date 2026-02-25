@@ -16,6 +16,7 @@ use kenobi::{
     cred::Outbound,
     typestate::{NoEncryption, NoSigning},
 };
+use uuid::Uuid;
 
 use crate::{
     access::AccessMask,
@@ -82,15 +83,26 @@ impl Connection {
         lock.read_exact(&mut new_size)?;
 
         let _response_header = Smb2SyncHeader::read_from(&mut lock.deref_mut())?;
-        let response_body = NegotiateResponse::read_from(&mut lock)?;
+        let NegotiateResponse {
+            max_transaction_size,
+            max_read_size,
+            max_write_size,
+            security_mode,
+            server_guid,
+            ..
+        } = NegotiateResponse::read_from(&mut lock)?;
         drop(lock);
         Ok(Connection {
             client,
             sessions: Mutex::default(),
             tcp,
             server_name,
+            max_read_size,
+            max_transaction_size,
+            max_write_size,
+            server_guid,
             message_id: AtomicU64::new(1),
-            requires_signing: response_body.is_signing_required(),
+            requires_signing: security_mode.signing_required(),
         })
     }
 }
@@ -100,7 +112,11 @@ pub struct Connection {
     sessions: Mutex<HashMap<u64, Weak<Session>>>,
     tcp: Mutex<TcpStream>,
     message_id: AtomicU64,
+    max_read_size: u32,
+    max_transaction_size: u32,
+    max_write_size: u32,
     requires_signing: bool,
+    server_guid: Uuid,
     server_name: Arc<ServerName>,
 }
 impl Connection {
@@ -117,7 +133,8 @@ impl Drop for Connection {
 pub struct Session {
     connection: Arc<Connection>,
     auth_ctx: Arc<dyn Authentication>,
-    tree_connects: Mutex<HashMap<u32, Weak<Tree>>>,
+    tree_connects_by_id: Mutex<HashMap<u32, Weak<Tree>>>,
+    tree_connects_by_share_name: Mutex<HashMap<Arc<str>, Weak<Tree>>>,
     session_id: u64,
 }
 pub struct Kenobi(ClientContext<Outbound, NoSigning, NoEncryption>);
@@ -195,7 +212,8 @@ impl Session {
                     };
                     let session = Arc::new(Session {
                         connection: connection.clone(),
-                        tree_connects: Mutex::default(),
+                        tree_connects_by_id: Mutex::default(),
+                        tree_connects_by_share_name: Mutex::default(),
                         auth_ctx: Arc::new(auth_ctx),
                         session_id,
                     });
@@ -227,6 +245,7 @@ impl Drop for Session {
 pub struct Tree {
     session: Arc<Session>,
     tree_id: u32,
+    share_name: Arc<str>,
 }
 impl Session {
     pub fn tree_connect(session: Arc<Session>, share_path: &str) -> std::io::Result<Arc<Tree>> {
@@ -249,17 +268,25 @@ impl Session {
             write_tcp_message(Some(auth), &header, &msg, &mut tcp)?;
             read_tcp_message(auth, &mut tcp)?
         };
+        let share_name: Arc<str> = Arc::from(share_path.to_string());
         let _response = TreeConnectResponse::read_from(message.as_slice())?;
         let tree = Arc::new(Tree {
             session: session.clone(),
+            share_name: share_name.clone(),
             tree_id,
         });
         if session
-            .tree_connects
+            .tree_connects_by_id
             .lock()
             .unwrap()
             .insert(tree_id, Arc::downgrade(&tree))
             .is_some()
+            || session
+                .tree_connects_by_share_name
+                .lock()
+                .unwrap()
+                .insert(share_name, Arc::downgrade(&tree))
+                .is_some()
         {
             Err(std::io::Error::new(
                 ErrorKind::AlreadyExists,
@@ -302,7 +329,12 @@ impl Tree {
 }
 impl Drop for Tree {
     fn drop(&mut self) {
-        self.session.tree_connects.lock().unwrap().remove(&self.tree_id);
+        self.session.tree_connects_by_id.lock().unwrap().remove(&self.tree_id);
+        self.session
+            .tree_connects_by_share_name
+            .lock()
+            .unwrap()
+            .remove(&self.share_name);
     }
 }
 

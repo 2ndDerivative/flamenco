@@ -85,14 +85,14 @@ fn register_connection(
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ServerName {
     IpAddr(IpAddr),
-    ServerName(String),
+    ServerName(Box<str>),
 }
 pub trait ToServerName: Clone {
     fn to_server_name(&self) -> ServerName;
 }
 impl ToServerName for &str {
     fn to_server_name(&self) -> ServerName {
-        ServerName::ServerName(self.to_string())
+        ServerName::ServerName(self.to_string().into_boxed_str())
     }
 }
 impl ToServerName for IpAddr {
