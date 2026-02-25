@@ -2,26 +2,24 @@ use std::{
     collections::HashMap,
     convert::Infallible,
     io::{Read, Write},
-    net::{SocketAddr, TcpStream, ToSocketAddrs},
-    ops::{Deref, DerefMut},
+    net::{TcpStream, ToSocketAddrs},
+    ops::DerefMut,
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicU64, Ordering},
     },
 };
 
-use hmac::{Hmac, Mac};
 #[cfg(feature = "kenobi")]
 use kenobi::{
     client::ClientContext,
     cred::Outbound,
     typestate::{NoEncryption, NoSigning},
 };
-use sha2::Sha256;
-use uuid::Uuid;
 
 use crate::{
     access::AccessMask,
+    auth::Authentication,
     command::Command,
     create::{CreateDisposition, CreateRequest, CreateResponse, OplockLevel, ShareAccess},
     dialect::Dialect,
@@ -31,8 +29,12 @@ use crate::{
     tree::{TreeConnectRequest, TreeConnectResponse},
 };
 
+pub use client::Client;
+
 mod access;
+mod auth;
 mod byteorder;
+mod client;
 mod command;
 mod create;
 mod dialect;
@@ -45,22 +47,9 @@ mod tree;
 
 pub const DEFAULT_PORT: u16 = 445;
 
-#[derive(Default)]
-pub struct Client {
-    connections: Arc<Mutex<HashMap<SocketAddr, Weak<Connection>>>>,
-    client_guid: Uuid,
-}
-impl Client {
-    pub fn new() -> std::io::Result<Arc<Self>> {
-        let client = Self::default();
-        Ok(Arc::new(client))
-    }
-}
 impl Connection {
-    pub fn new(client: Arc<Client>, addr: impl ToSocketAddrs + Clone) -> std::io::Result<Arc<Connection>> {
-        let socket = addr.to_socket_addrs()?.next().unwrap();
-        let tcp = TcpStream::connect(socket)?;
-        let tcp = Mutex::new(tcp);
+    pub fn new(client: Client, addr: impl ToSocketAddrs + Clone) -> std::io::Result<Arc<Connection>> {
+        let tcp = Mutex::new(TcpStream::connect(addr)?);
         let mut lock = tcp.lock().unwrap();
         write_tcp_message(
             None::<&Infallible>,
@@ -79,7 +68,7 @@ impl Connection {
             &NegotiateRequest {
                 security_mode: SecurityMode16::SIGNING_REQUIRED,
                 capabilities: 0x00,
-                client_guid: client.client_guid,
+                client_guid: client.client_id(),
                 dialects: vec![Dialect::Smb202],
             },
             &mut lock,
@@ -89,9 +78,12 @@ impl Connection {
 
         let _response_header = Smb2SyncHeader::read_from(&mut lock.deref_mut())?;
         let response_body = NegotiateResponse::read_from(&mut lock)?;
+        let addr = lock.peer_addr()?;
+        let cl2 = client.clone();
+        std::thread::spawn(|| cl2);
         drop(lock);
         Ok(Arc::new_cyclic(|weak| {
-            client.connections.lock().unwrap().insert(socket, weak.clone());
+            client.register_connection(addr, weak.clone());
             Connection {
                 client,
                 sessions: Mutex::default(),
@@ -104,7 +96,7 @@ impl Connection {
 }
 
 pub struct Connection {
-    client: Arc<Client>,
+    client: Client,
     sessions: Mutex<HashMap<u64, Weak<Session>>>,
     tcp: Mutex<TcpStream>,
     message_id: AtomicU64,
@@ -114,11 +106,11 @@ impl Connection {
     fn next_message_id(&self) -> u64 {
         self.message_id.fetch_add(1, Ordering::Relaxed)
     }
-    pub fn get_session(&self, id: u64) -> Option<Arc<Session>> {
-        let mut map = self.sessions.lock().unwrap();
-        map.remove(&id)?.upgrade().inspect(|undropped| {
-            map.insert(id, Arc::downgrade(undropped));
-        })
+}
+impl Drop for Connection {
+    fn drop(&mut self) {
+        let addr = self.tcp.get_mut().unwrap().peer_addr().unwrap();
+        self.client.deregister_connection(addr);
     }
 }
 
@@ -129,36 +121,7 @@ pub struct Session {
     session_id: u64,
 }
 pub struct Kenobi(ClientContext<Outbound, NoSigning, NoEncryption>);
-pub trait Authentication {
-    fn session_key(&self) -> [u8; 16];
-    fn verify_signature(&self, message_without_signature: &[u8], signature: &[u8; 16]) -> bool {
-        let mut hmac = Hmac::<Sha256>::new_from_slice(&self.session_key()).unwrap();
-        hmac.update(message_without_signature);
-        let message_hash = hmac.finalize().into_bytes();
-        &message_hash[0..16] == signature
-    }
-    fn create_signature(&self, message_without_signature: &[u8]) -> [u8; 16] {
-        let mut hmac = Hmac::<Sha256>::new_from_slice(&self.session_key()).unwrap();
-        hmac.update(message_without_signature);
-        hmac.finalize().into_bytes()[..16].try_into().unwrap()
-    }
-}
-impl Authentication for Infallible {
-    fn session_key(&self) -> [u8; 16] {
-        unreachable!()
-    }
-}
-impl Authentication for Kenobi {
-    fn session_key(&self) -> [u8; 16] {
-        let raw_key = ClientContext::session_key(&self.0);
-        raw_key[0..16].try_into().unwrap()
-    }
-}
-impl<T: Deref<Target: Authentication>> Authentication for &T {
-    fn session_key(&self) -> [u8; 16] {
-        T::Target::session_key(self)
-    }
-}
+
 #[cfg(feature = "kenobi")]
 impl Session {
     pub fn new_kenobi(
@@ -249,6 +212,11 @@ impl Session {
         }
     }
 }
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.connection.sessions.lock().unwrap().remove(&self.session_id);
+    }
+}
 
 pub struct Tree {
     session: Arc<Session>,
@@ -310,6 +278,11 @@ impl Tree {
         let (_header, message) = read_tcp_message(auth, &mut tcp)?;
         let response = CreateResponse::read_from(message.as_slice())?;
         Ok(response)
+    }
+}
+impl Drop for Tree {
+    fn drop(&mut self) {
+        self.session.tree_connects.lock().unwrap().remove(&self.tree_id);
     }
 }
 
@@ -375,9 +348,9 @@ mod test {
         let tree = var("FLAMENCO_TEST_TREE").unwrap();
         let test_file = var("FLAMENCO_TEST_FILE").unwrap();
 
-        let client = Client::new().unwrap();
+        let client = Client::new();
 
-        let connection = Connection::new(client.clone(), test_server).unwrap();
+        let connection = Connection::new(client, test_server).unwrap();
 
         let session = Session::new_kenobi(connection, test_spn.as_deref(), test_target_spn.as_deref()).unwrap();
 
