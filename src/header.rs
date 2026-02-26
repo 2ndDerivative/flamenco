@@ -4,7 +4,8 @@ const PROTOCOL_ID: [u8; 4] = [0xFE, b'S', b'M', b'B'];
 
 #[derive(Debug)]
 pub struct SyncHeader202 {
-    pub command: Command,
+    pub status: u32,
+    pub command: Command202,
     pub credits: u16,
     pub flags: u32,
     pub next_command: Option<NonZero<u32>>,
@@ -21,9 +22,10 @@ impl SyncHeader202 {
         if u16::from_be_bytes(*b[4..6].as_array().unwrap()) != 64 {
             return Err(Error::InvalidSize);
         }
-        // Ignore credit charge and status
+        // Ignore credit charge
+        let status = u32::from_be_bytes(*b[8..12].as_array().unwrap());
         let command = u16::from_be_bytes(*b[12..14].as_array().unwrap());
-        let command = Command::from_code(command).ok_or(Error::InvalidCommand)?;
+        let command = Command202::from_code(command).ok_or(Error::InvalidCommand)?;
         let credits = u16::from_be_bytes(*b[14..16].as_array().unwrap());
         let flags = u32::from_be_bytes(*b[16..20].as_array().unwrap());
         let next_command = u32::from_be_bytes(*b[20..24].as_array().unwrap());
@@ -33,6 +35,7 @@ impl SyncHeader202 {
         let session_id = u64::from_be_bytes(*b[40..48].as_array().unwrap());
         let signature: [u8; 16] = *b[48..64].as_array().unwrap();
         Ok(Self {
+            status,
             command,
             credits,
             flags,
@@ -69,7 +72,7 @@ pub enum Error {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum Command {
+pub enum Command202 {
     Negotiate = 0x00,
     SessionSetup = 0x01,
     Logoff = 0x02,
@@ -90,7 +93,7 @@ pub enum Command {
     SetInfo = 0x11,
     OplockBreak = 0x12,
 }
-impl Command {
+impl Command202 {
     pub fn from_code(u: u16) -> Option<Self> {
         match u {
             0x00 => Some(Self::Negotiate),
@@ -112,7 +115,6 @@ impl Command {
             0x10 => Some(Self::QueryInfo),
             0x11 => Some(Self::SetInfo),
             0x12 => Some(Self::OplockBreak),
-            0x03..=0x13 => todo!("unimplemented command"),
             _ => None,
         }
     }
