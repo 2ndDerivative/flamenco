@@ -132,7 +132,7 @@ fn buffer_for_delayed_validation<R: Read>(mut r: R) -> Result<Box<[u8]>, MsgRead
                 "Not enough data for header",
             )));
         }
-        0x0100_0000.. => panic!("Invalid header: no leading zero"),
+        0x0100_0000.. => return Err(MsgReadError::NetBIOS),
         size => size,
     };
     let message_body_size = message_size as usize;
@@ -166,9 +166,9 @@ impl From<MsgWriteError> for SessionSetupError {
 impl From<MsgReadError> for SessionSetupError {
     fn from(value: MsgReadError) -> Self {
         match value {
-            MsgReadError::InvalidSignature | MsgReadError::InvalidlySignedMessage => {
-                Self::InvalidMessage
-            }
+            MsgReadError::InvalidSignature
+            | MsgReadError::InvalidlySignedMessage
+            | MsgReadError::NetBIOS => Self::InvalidMessage,
             MsgReadError::Connection(io) => Self::Io(io),
         }
     }

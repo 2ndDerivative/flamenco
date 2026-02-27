@@ -25,7 +25,7 @@ pub fn read_202_message<R: Read>(
                 "Not enough data for header",
             )));
         }
-        0x0100_0000.. => panic!("Invalid header: no leading zero"),
+        0x0100_0000.. => return Err(ReadError::NetBIOS),
         size => size,
     };
     let mut header_bytes = [0u8; 64];
@@ -82,6 +82,7 @@ fn validate_signature(
 
 #[derive(Debug)]
 pub enum ReadError {
+    NetBIOS,
     InvalidSignature,
     InvalidlySignedMessage,
     Connection(std::io::Error),
