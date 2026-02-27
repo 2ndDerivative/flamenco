@@ -1,5 +1,7 @@
+use uuid::Uuid;
+
 use crate::{ReadLe, message::MessageBody, sign::SecurityMode};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 /// Negotiate request in SMB2020 must set client ID to 0
 #[derive(Debug)]
@@ -32,6 +34,9 @@ impl MessageBody for NegotiateRequest202 {
     fn write_to<W: Write>(&self, w: W) -> Result<(), Self::Err> {
         self.write_into(w)
     }
+    fn size_hint(&self) -> usize {
+        38
+    }
 }
 
 #[derive(Debug)]
@@ -48,20 +53,53 @@ impl From<std::io::Error> for WriteError {
 pub struct NegotiateResponse {
     pub security_mode: SecurityMode,
     pub dialect: Dialect,
+    pub server_guid: Uuid,
+    pub capabilities: u32,
+    pub max_transact_size: u32,
+    pub max_read_size: u32,
+    pub max_write_size: u32,
+    pub system_time: u64,
+    pub server_start_time: u64,
+    pub sec_buffer: Box<[u8]>,
 }
 impl NegotiateResponse {
     const STRUCTURE_SIZE: u16 = 65;
-    fn read_from<R: Read>(mut r: R) -> Result<Self, NegotiateError> {
+    pub fn read_from<R: Read + Seek>(mut r: R) -> Result<Self, NegotiateError> {
         if r.read_u16()? != Self::STRUCTURE_SIZE {
             return Err(NegotiateError::InvalidSize);
         }
         let security_mode = SecurityMode::from_value(r.read_u16()?);
         let dialect = Dialect::from_value(r.read_u16()?).ok_or(NegotiateError::InvalidDialect)?;
         // skip reserved
-        r.read_exact(&mut [0u8; 2])?;
+        r.seek_relative(2)?;
         let mut server_guid = [0u8; 16];
         r.read_exact(&mut server_guid)?;
-        todo!()
+        let server_guid = Uuid::from_bytes(server_guid);
+        let capabilities = r.read_u32()?;
+        let max_transact_size = r.read_u32()?;
+        let max_read_size = r.read_u32()?;
+        let max_write_size = r.read_u32()?;
+        let system_time = r.read_u64()?;
+        let server_start_time = r.read_u64()?;
+        let secbuf_offset = r.read_u16()?;
+        let secbuf_length = r.read_u16()?;
+        // ignore reserved and padding
+        r.seek(SeekFrom::Start((secbuf_offset - 64) as u64))?;
+        let mut sec_buffer = vec![0; secbuf_length as usize].into_boxed_slice();
+        r.read_exact(&mut sec_buffer)?;
+
+        Ok(Self {
+            security_mode,
+            dialect,
+            server_guid,
+            capabilities,
+            max_transact_size,
+            max_read_size,
+            max_write_size,
+            system_time,
+            server_start_time,
+            sec_buffer,
+        })
     }
 }
 
@@ -77,7 +115,7 @@ impl From<std::io::Error> for NegotiateError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Dialect {
     SMB2020,
     SMB21,
