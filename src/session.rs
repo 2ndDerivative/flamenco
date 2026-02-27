@@ -87,12 +87,11 @@ impl Session202<'_, '_> {
             auth_context = match auth_context.step(&sec_buffer) {
                 StepOut::Pending(p) => p,
                 StepOut::Finished(context) => {
-                    let session_key = context
+                    let session_key = *context
                         .session_key()
-                        .get(0..16)
+                        .split_first_chunk::<16>()
                         .ok_or(SessionSetupError::SessionKeyTooShort)?
-                        .try_into()
-                        .expect("checked for 16");
+                        .0;
                     let (_, _) = read_202_message(&*message_buffer, Validation::Key(session_key))?;
                     if flags == SessionFlags::Guest {
                         match connection.client.guest_policy {
