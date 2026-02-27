@@ -7,6 +7,7 @@ mod message;
 mod negotiate;
 mod session;
 mod sign;
+mod tree;
 
 trait ReadLe: Read {
     fn read_u16(&mut self) -> std::io::Result<u16> {

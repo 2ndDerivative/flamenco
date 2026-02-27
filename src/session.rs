@@ -18,6 +18,7 @@ use crate::{
         read_202_message, write_202_message,
     },
     sign::SecurityMode,
+    tree::{TreeConnectError, TreeConnection},
 };
 
 const ERROR_MORE_PROCESSING_REQUIRED: u32 = 0xC0000016;
@@ -25,8 +26,8 @@ const ERROR_MORE_PROCESSING_REQUIRED: u32 = 0xC0000016;
 pub struct Session202<'con, 'cred> {
     cred: &'cred Credentials<Outbound>,
     session_key: [u8; 16],
-    id: u64,
-    connection: &'con mut Connection<'con>,
+    pub(crate) id: u64,
+    pub(crate) connection: &'con mut Connection<'con>,
     flags: SessionFlags,
 }
 impl Session202<'_, '_> {
@@ -117,8 +118,19 @@ impl Session202<'_, '_> {
             session_id = header.session_id;
         }
     }
+    pub(crate) fn session_key(&self) -> &[u8; 16] {
+        &self.session_key
+    }
     pub fn close(self) {
         drop(self);
+    }
+}
+impl<'con, 'cred> Session202<'con, 'cred> {
+    pub fn tree_connect(
+        &mut self,
+        share_path: &str,
+    ) -> Result<TreeConnection<'con, 'cred>, TreeConnectError> {
+        TreeConnection::new(self, share_path)
     }
 }
 impl<'con, 'cred> Drop for Session202<'con, 'cred> {
