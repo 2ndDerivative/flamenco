@@ -7,6 +7,7 @@ use crate::{
     header::{Command202, SyncHeader202Outgoing},
     message::{ReadError, WriteError, read_202_message, write_202_message},
     negotiate::NegotiateRequest202,
+    sign::SecurityMode,
 };
 
 #[derive(Debug, Default)]
@@ -26,8 +27,10 @@ impl Client202 {
             tree_id: 0,
             session_id: 0,
         };
+        let neg_req = NegotiateRequest202 {
+            capabilities: 0,
+            security_mode: SecurityMode::None,
         };
-        let neg_req = NegotiateRequest202 { capabilities: 0 };
         write_202_message(&mut tcp, &neg_header, &neg_req)?;
 
         let (header, body) = read_202_message(&mut tcp)?;

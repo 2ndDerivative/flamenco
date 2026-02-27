@@ -5,6 +5,7 @@ mod error;
 mod header;
 mod message;
 mod negotiate;
+mod sign;
 
 trait ReadLe: Read {
     fn read_u16(&mut self) -> std::io::Result<u16> {

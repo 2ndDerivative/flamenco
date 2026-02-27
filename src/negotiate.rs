@@ -1,9 +1,10 @@
-use crate::{ReadLe, message::MessageBody};
+use crate::{ReadLe, message::MessageBody, sign::SecurityMode};
 use std::io::{Read, Write};
 
 /// Negotiate request in SMB2020 must set client ID to 0
 #[derive(Debug)]
 pub struct NegotiateRequest202 {
+    pub security_mode: SecurityMode,
     pub capabilities: u32,
 }
 impl NegotiateRequest202 {
@@ -13,7 +14,7 @@ impl NegotiateRequest202 {
         // dialect count
         w.write_all(&1u16.to_le_bytes())?;
         // Empty security mode
-        w.write_all(&0u16.to_le_bytes())?;
+        w.write_all(&(self.security_mode as u16).to_le_bytes())?;
         // Reserved
         w.write_all(&0u16.to_le_bytes())?;
         w.write_all(&self.capabilities.to_le_bytes())?;
@@ -76,23 +77,6 @@ impl From<std::io::Error> for NegotiateError {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum SecurityMode {
-    None,
-    SigningEnabled,
-    SigningRequired,
-}
-impl SecurityMode {
-    fn from_value(i: u16) -> Self {
-        if i & 0x02 != 0 {
-            Self::SigningRequired
-        } else if i & 0x01 != 0 {
-            Self::SigningEnabled
-        } else {
-            Self::None
-        }
-    }
-}
 #[derive(Debug)]
 pub enum Dialect {
     SMB2020,
