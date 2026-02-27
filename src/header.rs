@@ -20,20 +20,20 @@ impl SyncHeader202 {
         if b[0..4] != PROTOCOL_ID {
             return Err(Error::InvalidProtocolID);
         };
-        if u16::from_be_bytes(*b[4..6].as_array().unwrap()) != 64 {
+        if u16::from_le_bytes(*b[4..6].as_array().unwrap()) != 64 {
             return Err(Error::InvalidSize);
         }
         // Ignore credit charge
-        let status = u32::from_be_bytes(*b[8..12].as_array().unwrap());
-        let command = u16::from_be_bytes(*b[12..14].as_array().unwrap());
+        let status = u32::from_le_bytes(*b[8..12].as_array().unwrap());
+        let command = u16::from_le_bytes(*b[12..14].as_array().unwrap());
         let command = Command202::from_code(command).ok_or(Error::InvalidCommand)?;
-        let credits = u16::from_be_bytes(*b[14..16].as_array().unwrap());
-        let flags = u32::from_be_bytes(*b[16..20].as_array().unwrap());
-        let next_command = u32::from_be_bytes(*b[20..24].as_array().unwrap());
+        let credits = u16::from_le_bytes(*b[14..16].as_array().unwrap());
+        let flags = u32::from_le_bytes(*b[16..20].as_array().unwrap());
+        let next_command = u32::from_le_bytes(*b[20..24].as_array().unwrap());
         let next_command = NonZero::new(next_command);
-        let message_id = u64::from_be_bytes(*b[24..32].as_array().unwrap());
-        let tree_id = u32::from_be_bytes(*b[36..40].as_array().unwrap());
-        let session_id = u64::from_be_bytes(*b[40..48].as_array().unwrap());
+        let message_id = u64::from_le_bytes(*b[24..32].as_array().unwrap());
+        let tree_id = u32::from_le_bytes(*b[36..40].as_array().unwrap());
+        let session_id = u64::from_le_bytes(*b[40..48].as_array().unwrap());
         let signature: [u8; 16] = *b[48..64].as_array().unwrap();
         Ok(Self {
             status,
@@ -50,15 +50,15 @@ impl SyncHeader202 {
     pub fn to_bytes(&self) -> [u8; 64] {
         let mut bytes = [0u8; 64];
         bytes[0..4].copy_from_slice(&PROTOCOL_ID);
-        bytes[4..6].copy_from_slice(&64u16.to_be_bytes());
+        bytes[4..6].copy_from_slice(&64u16.to_le_bytes());
         // credit charge and status is already 0
-        bytes[12..14].copy_from_slice(&self.command.as_u16().to_be_bytes());
-        bytes[14..16].copy_from_slice(&self.credits.to_be_bytes());
-        bytes[16..20].copy_from_slice(&self.flags.to_be_bytes());
-        bytes[20..24].copy_from_slice(&self.next_command.map_or(0, |n| n.get()).to_be_bytes());
-        bytes[24..32].copy_from_slice(&self.message_id.to_be_bytes());
-        bytes[36..40].copy_from_slice(&self.tree_id.to_be_bytes());
-        bytes[40..48].copy_from_slice(&self.session_id.to_be_bytes());
+        bytes[12..14].copy_from_slice(&self.command.as_u16().to_le_bytes());
+        bytes[14..16].copy_from_slice(&self.credits.to_le_bytes());
+        bytes[16..20].copy_from_slice(&self.flags.to_le_bytes());
+        bytes[20..24].copy_from_slice(&self.next_command.map_or(0, |n| n.get()).to_le_bytes());
+        bytes[24..32].copy_from_slice(&self.message_id.to_le_bytes());
+        bytes[36..40].copy_from_slice(&self.tree_id.to_le_bytes());
+        bytes[40..48].copy_from_slice(&self.session_id.to_le_bytes());
         bytes[48..64].copy_from_slice(&self.signature);
 
         bytes

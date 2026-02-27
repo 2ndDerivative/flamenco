@@ -1,4 +1,7 @@
-use std::io::{ErrorKind, Read};
+use std::{
+    fmt::Debug,
+    io::{ErrorKind, Read, Write},
+};
 
 use crate::header::SyncHeader202;
 
@@ -6,7 +9,7 @@ use crate::header::SyncHeader202;
 pub fn read_202_message<R: Read>(mut r: R) -> std::io::Result<(SyncHeader202, Box<[u8]>)> {
     let mut bios_size = [0u8; 4];
     r.read_exact(&mut bios_size)?;
-    let message_size = match u32::from_be_bytes(bios_size) {
+    let message_size = match u32::from_le_bytes(bios_size) {
         0..64 => {
             return Err(std::io::Error::new(
                 ErrorKind::UnexpectedEof,
@@ -23,4 +26,38 @@ pub fn read_202_message<R: Read>(mut r: R) -> std::io::Result<(SyncHeader202, Bo
     let mut message_body = vec![0u8; message_body_size].into_boxed_slice();
     r.read_exact(&mut message_body)?;
     Ok((header, message_body))
+}
+
+pub fn write_202_message<W: Write, M: MessageBody>(
+    mut w: W,
+    header: &SyncHeader202,
+    body: &M,
+) -> Result<(), Error> {
+    let mut buffer = Vec::with_capacity(64 + body.size_hint());
+    buffer.write_all(&header.to_bytes()).unwrap();
+    body.write_to(&mut buffer).unwrap();
+    match buffer.len() {
+        0..=64 => unreachable!(),
+        0x0100_0000.. => Err(Error::MessageTooLong),
+        len => {
+            w.write_all(&(len as u32).to_le_bytes())
+                .map_err(Error::Connection)?;
+            w.write_all(&buffer).map_err(Error::Connection)?;
+            Ok(())
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum Error {
+    Connection(std::io::Error),
+    MessageTooLong,
+}
+
+pub(crate) trait MessageBody {
+    type Err: Debug;
+    fn write_to<W: Write>(&self, w: W) -> Result<(), Self::Err>;
+    fn size_hint(&self) -> usize {
+        0
+    }
 }

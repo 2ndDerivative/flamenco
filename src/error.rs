@@ -11,14 +11,14 @@ impl ErrorResponse2 {
         else {
             return Err(Error::UnexpectedEof);
         };
-        if u16::from_be_bytes(*structure_body[0..2].as_array().unwrap()) != 9 {
+        if u16::from_le_bytes(*structure_body[0..2].as_array().unwrap()) != 9 {
             return Err(Error::InvalidStructureSize);
         }
         if structure_body[2] != 0 {
             return Err(Error::ContextNotSupported);
         }
         // ignore reserved
-        let byte_count = u32::from_be_bytes(*structure_body[4..8].as_array().unwrap());
+        let byte_count = u32::from_le_bytes(*structure_body[4..8].as_array().unwrap());
         match (byte_count as usize).cmp(&error_data.len()) {
             Ordering::Less => Err(Error::ExcessTrailingBytes),
             Ordering::Equal => Ok(ErrorResponse2 {
