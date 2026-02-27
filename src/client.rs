@@ -4,20 +4,38 @@ use std::{
     num::NonZero,
 };
 
+use kenobi::cred::{Credentials, Outbound};
+
 use crate::{
     error::{ErrorResponse2, ServerError},
     header::{Command202, SyncHeader202Outgoing},
-    message::{ReadError, WriteError, read_202_message, write_202_message},
+    message::{ReadError, Validation, WriteError, read_202_message, write_202_message},
     negotiate::{Dialect, NegotiateError, NegotiateRequest202, NegotiateResponse},
+    session::{Session202, SessionSetupError},
     sign::SecurityMode,
 };
 
 const MINIMUM_TRANSACT_SIZE: u32 = 65536;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum GuestPolicy {
+    #[default]
+    Disallowed,
+    Allowed,
+    AllowedInsecurely,
+}
+
 #[derive(Debug, Default)]
-pub struct Client202;
+pub struct Client202 {
+    pub requires_signing: bool,
+    pub guest_policy: GuestPolicy,
+}
 impl Client202 {
-    pub fn new() -> Self {
-        Client202
+    pub fn new(require_signing: bool) -> Self {
+        Self {
+            requires_signing: require_signing,
+            ..Default::default()
+        }
     }
     pub fn connect(&self, addr: impl ToSocketAddrs) -> Result<Connection<'_>, ConnectError> {
         let mut tcp = TcpStream::connect(addr)?;
@@ -34,9 +52,9 @@ impl Client202 {
             capabilities: 0,
             security_mode: SecurityMode::None,
         };
-        write_202_message(&mut tcp, &neg_header, &neg_req)?;
+        write_202_message(&mut tcp, None, &neg_header, &neg_req)?;
 
-        let (header, body) = read_202_message(&mut tcp)?;
+        let (header, body) = read_202_message(&mut tcp, Validation::ExpectNone)?;
         if let Some(code) = NonZero::new(header.status) {
             return Err(ConnectError::handle_error_body(code, &body));
         }
@@ -50,7 +68,7 @@ impl Client202 {
         {
             return Err(ConnectError::MaxMessageSizeInsufficient);
         }
-        let requires_signing = neg_resp.security_mode == SecurityMode::SigningRequired;
+        let server_requires_signing = neg_resp.security_mode == SecurityMode::SigningRequired;
         match neg_resp.dialect {
             Dialect::SMB2020 => {}
             Dialect::Wildcard => unimplemented!(),
@@ -64,7 +82,7 @@ impl Client202 {
             max_transact_size: neg_resp.max_transact_size,
             max_read_size: neg_resp.max_read_size,
             max_write_size: neg_resp.max_write_size,
-            requires_signing,
+            server_requires_signing,
         })
     }
 }
@@ -76,13 +94,25 @@ pub struct Connection<'client> {
     max_transact_size: u32,
     max_read_size: u32,
     max_write_size: u32,
-    requires_signing: bool,
+    server_requires_signing: bool,
 }
 impl Connection<'_> {
-    fn fetch_increment_message_id(&mut self) -> u64 {
+    pub fn fetch_increment_message_id(&mut self) -> u64 {
         let num = self.message_id;
         self.message_id += 1;
         num
+    }
+    pub fn server_requires_signing(&self) -> bool {
+        self.server_requires_signing
+    }
+}
+impl<'con> Connection<'con> {
+    pub fn setup_session<'cred>(
+        &'con mut self,
+        credentials: &'cred Credentials<Outbound>,
+        target_spn: Option<&str>,
+    ) -> Result<Session202<'con, 'cred>, SessionSetupError> {
+        Session202::new(self, credentials, target_spn)
     }
 }
 
@@ -127,6 +157,7 @@ impl From<ReadError> for ConnectError {
     fn from(value: ReadError) -> Self {
         match value {
             ReadError::Connection(io) => Self::Io(io),
+            ReadError::InvalidSignature | ReadError::InvalidlySignedMessage => Self::InvalidMessage,
         }
     }
 }

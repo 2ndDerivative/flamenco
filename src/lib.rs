@@ -5,6 +5,7 @@ mod error;
 mod header;
 mod message;
 mod negotiate;
+mod session;
 mod sign;
 
 trait ReadLe: Read {
