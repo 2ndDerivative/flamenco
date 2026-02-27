@@ -105,7 +105,8 @@ pub fn write_202_message<W: Write, M: MessageBody>(
                 let mut hasher = Hmac::<Sha256>::new_from_slice(&session_key).unwrap();
                 hasher.update(&buffer);
                 let hash_result = hasher.finalize();
-                buffer.copy_from_slice(&hash_result.into_bytes()[0..16]);
+                buffer[48..64]
+                    .copy_from_slice(hash_result.into_bytes().first_chunk::<16>().unwrap());
             }
             w.write_all(&(len as u32).to_be_bytes())
                 .map_err(WriteError::Connection)?;
