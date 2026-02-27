@@ -2,8 +2,35 @@ use std::num::NonZero;
 
 const PROTOCOL_ID: [u8; 4] = [0xFE, b'S', b'M', b'B'];
 
+/// No status and signature, since they're not supported on the sender anyway
+pub struct SyncHeader202Outgoing {
+    pub command: Command202,
+    pub credits: u16,
+    pub flags: u32,
+    pub next_command: Option<NonZero<u32>>,
+    pub message_id: u64,
+    pub tree_id: u32,
+    pub session_id: u64,
+}
+impl SyncHeader202Outgoing {
+    pub fn to_bytes(&self) -> [u8; 64] {
+        let mut bytes = [0u8; 64];
+        bytes[0..4].copy_from_slice(&PROTOCOL_ID);
+        bytes[4..6].copy_from_slice(&64u16.to_le_bytes());
+        // credit charge and status is already 0
+        bytes[12..14].copy_from_slice(&self.command.as_u16().to_le_bytes());
+        bytes[14..16].copy_from_slice(&self.credits.to_le_bytes());
+        bytes[16..20].copy_from_slice(&self.flags.to_le_bytes());
+        bytes[20..24].copy_from_slice(&self.next_command.map_or(0, |n| n.get()).to_le_bytes());
+        bytes[24..32].copy_from_slice(&self.message_id.to_le_bytes());
+        bytes[36..40].copy_from_slice(&self.tree_id.to_le_bytes());
+        bytes[40..48].copy_from_slice(&self.session_id.to_le_bytes());
+        bytes
+    }
+}
+
 #[derive(Debug)]
-pub struct SyncHeader202 {
+pub struct SyncHeader202Incoming {
     /// ignored when sending
     pub status: u32,
     pub command: Command202,
@@ -15,7 +42,7 @@ pub struct SyncHeader202 {
     pub session_id: u64,
     pub signature: [u8; 16],
 }
-impl SyncHeader202 {
+impl SyncHeader202Incoming {
     pub fn from_bytes(b: &[u8; 64]) -> Result<Self, Error> {
         if b[0..4] != PROTOCOL_ID {
             return Err(Error::InvalidProtocolID);
@@ -46,22 +73,6 @@ impl SyncHeader202 {
             session_id,
             signature,
         })
-    }
-    pub fn to_bytes(&self) -> [u8; 64] {
-        let mut bytes = [0u8; 64];
-        bytes[0..4].copy_from_slice(&PROTOCOL_ID);
-        bytes[4..6].copy_from_slice(&64u16.to_le_bytes());
-        // credit charge and status is already 0
-        bytes[12..14].copy_from_slice(&self.command.as_u16().to_le_bytes());
-        bytes[14..16].copy_from_slice(&self.credits.to_le_bytes());
-        bytes[16..20].copy_from_slice(&self.flags.to_le_bytes());
-        bytes[20..24].copy_from_slice(&self.next_command.map_or(0, |n| n.get()).to_le_bytes());
-        bytes[24..32].copy_from_slice(&self.message_id.to_le_bytes());
-        bytes[36..40].copy_from_slice(&self.tree_id.to_le_bytes());
-        bytes[40..48].copy_from_slice(&self.session_id.to_le_bytes());
-        bytes[48..64].copy_from_slice(&self.signature);
-
-        bytes
     }
 }
 

@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    header::{Command202, SyncHeader202},
+    header::{Command202, SyncHeader202Outgoing},
     message::{ReadError, WriteError, read_202_message, write_202_message},
     negotiate::NegotiateRequest202,
 };
@@ -17,8 +17,7 @@ impl Client202 {
     }
     pub fn connect(&self, addr: impl ToSocketAddrs) -> Result<Connection<'_>, ConnectError> {
         let mut tcp = TcpStream::connect(addr)?;
-        let neg_header = SyncHeader202 {
-            status: 0,
+        let neg_header = SyncHeader202Outgoing {
             command: Command202::Negotiate,
             credits: 0,
             flags: 0,
@@ -26,7 +25,7 @@ impl Client202 {
             message_id: 0,
             tree_id: 0,
             session_id: 0,
-            signature: [0; 16],
+        };
         };
         let neg_req = NegotiateRequest202 { capabilities: 0 };
         write_202_message(&mut tcp, &neg_header, &neg_req)?;

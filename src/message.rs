@@ -3,10 +3,12 @@ use std::{
     io::{Error as IoError, ErrorKind, Read, Write},
 };
 
-use crate::header::SyncHeader202;
+use crate::header::{SyncHeader202Incoming, SyncHeader202Outgoing};
 
 /// Signature validation and netBIOS stuff should be happening here
-pub fn read_202_message<R: Read>(mut r: R) -> Result<(SyncHeader202, Box<[u8]>), ReadError> {
+pub fn read_202_message<R: Read>(
+    mut r: R,
+) -> Result<(SyncHeader202Incoming, Box<[u8]>), ReadError> {
     let mut bios_size = [0u8; 4];
     r.read_exact(&mut bios_size)
         .map_err(ReadError::Connection)?;
@@ -23,7 +25,7 @@ pub fn read_202_message<R: Read>(mut r: R) -> Result<(SyncHeader202, Box<[u8]>),
     let mut header_bytes = [0u8; 64];
     r.read_exact(&mut header_bytes)
         .map_err(ReadError::Connection)?;
-    let header = SyncHeader202::from_bytes(&header_bytes).unwrap();
+    let header = SyncHeader202Incoming::from_bytes(&header_bytes).unwrap();
     let message_body_size = (message_size - 64) as usize;
     let mut message_body = vec![0u8; message_body_size].into_boxed_slice();
     r.read_exact(&mut message_body)
@@ -38,7 +40,7 @@ pub enum ReadError {
 
 pub fn write_202_message<W: Write, M: MessageBody>(
     mut w: W,
-    header: &SyncHeader202,
+    header: &SyncHeader202Outgoing,
     body: &M,
 ) -> Result<(), WriteError> {
     let mut buffer = Vec::with_capacity(64 + body.size_hint());
