@@ -73,7 +73,7 @@ impl Session202<'_, '_> {
                 previous_session_id: 0,
                 buffer: auth_context.next_token(),
             };
-            write_202_message(&mut connection.tcp, None, &header, &body)?;
+            write_202_message(&mut connection.tcp, None, header, &body)?;
             let message_buffer = buffer_for_delayed_validation(&mut connection.tcp)?;
             let (header, body) = read_202_message(&mut message_buffer.as_ref(), Validation::Skip)?;
             // Lookup session ID
@@ -144,12 +144,8 @@ impl<'con, 'cred> Drop for Session202<'con, 'cred> {
             tree_id: 0,
             session_id: self.id,
         };
-        let _ = write_202_message(
-            &mut self.connection.tcp,
-            Some(self.session_key),
-            &logoff_header,
-            &LogoffRequest,
-        );
+        let key = self.requires_signing().then_some(self.session_key);
+        let _ = write_202_message(&mut self.connection.tcp, key, logoff_header, &LogoffRequest);
         let _ = read_202_message(&mut self.connection.tcp, Validation::Key(self.session_key));
     }
 }
@@ -203,6 +199,7 @@ impl From<MsgReadError> for SessionSetupError {
         match value {
             MsgReadError::InvalidSignature
             | MsgReadError::InvalidlySignedMessage
+            | MsgReadError::NotSigned
             | MsgReadError::NetBIOS => Self::InvalidMessage,
             MsgReadError::Connection(io) => Self::Io(io),
         }

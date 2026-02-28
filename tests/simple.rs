@@ -10,7 +10,7 @@ fn main() {
     let own_spn = std::env::var("FLAMENCO_TEST_SPN").ok();
     let target_spn = std::env::var("FLAMENCO_TEST_TARGET_SPN").ok();
     let share_path = std::env::var("FLAMENCO_TEST_SHARE_PATH").unwrap();
-    let client = Client202::default();
+    let client = Client202::new(true);
     let credentials = Credentials::new(own_spn.as_deref()).unwrap();
     let mut con = client.connect(server).unwrap();
     let mut session = con

@@ -2,6 +2,8 @@ use std::num::NonZero;
 
 const PROTOCOL_ID: [u8; 4] = [0xFE, b'S', b'M', b'B'];
 
+pub(crate) const FLAG_SIGNED: u32 = 0x08;
+
 /// No status and signature, since they're not supported on the sender anyway
 pub struct SyncHeader202Outgoing {
     pub command: Command202,

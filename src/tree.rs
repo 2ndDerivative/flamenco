@@ -29,16 +29,19 @@ impl TreeConnection<'_, '_> {
             tree_id: 0,
             session_id: session.id,
         };
-        let session_key = *session.session_key();
+        let session_key = session
+            .requires_signing()
+            .then_some(session.session_key())
+            .copied();
         write_202_message(
             &mut session.connection.tcp,
-            Some(session_key),
-            &tc_header,
+            session_key,
+            tc_header,
             &TreeConnectRequest(path),
         )
         .unwrap();
         let (header, msg) =
-            read_202_message(&mut session.connection.tcp, Validation::Key(session_key)).unwrap();
+            read_202_message(&mut session.connection.tcp, Validation::from(session_key)).unwrap();
         if let Some(code) = NonZero::new(header.status) {
             return Err(ServerError::handle_error_body(code, &msg));
         }

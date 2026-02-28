@@ -8,7 +8,7 @@ use sha2::Sha256;
 
 const STATUS_PENDING: u32 = 0x00000103;
 
-use crate::header::{SyncHeader202Incoming, SyncHeader202Outgoing};
+use crate::header::{FLAG_SIGNED, SyncHeader202Incoming, SyncHeader202Outgoing};
 
 /// Signature validation and netBIOS stuff should be happening here
 pub fn read_202_message<R: Read>(
@@ -36,11 +36,19 @@ pub fn read_202_message<R: Read>(
     let mut message_body = vec![0u8; message_body_size].into_boxed_slice();
     r.read_exact(&mut message_body)
         .map_err(ReadError::Connection)?;
+    let is_signed = header.flags & FLAG_SIGNED != 0;
     match validation {
         Validation::Skip => Ok((header, message_body)),
         Validation::Key(key) => {
             if header.message_id != u64::MAX && header.status != STATUS_PENDING {
-                if validate_signature(&key, &header.signature, &mut header_bytes, &message_body) {
+                if !is_signed {
+                    Err(ReadError::NotSigned)
+                } else if validate_signature(
+                    &key,
+                    &header.signature,
+                    &mut header_bytes,
+                    &message_body,
+                ) {
                     Ok((header, message_body))
                 } else {
                     Err(ReadError::InvalidSignature)
@@ -49,13 +57,10 @@ pub fn read_202_message<R: Read>(
                 Err(ReadError::InvalidlySignedMessage)
             }
         }
-        Validation::ExpectNone => {
-            if header.signature == [0; 16] {
-                Ok((header, message_body))
-            } else {
-                Err(ReadError::InvalidlySignedMessage)
-            }
+        Validation::ExpectNone if !is_signed && header.signature == [0u8; 16] => {
+            Ok((header, message_body))
         }
+        Validation::ExpectNone => Err(ReadError::InvalidlySignedMessage),
     }
 }
 
@@ -65,6 +70,14 @@ pub enum Validation {
     #[default]
     ExpectNone,
     Key([u8; 16]),
+}
+impl From<Option<[u8; 16]>> for Validation {
+    fn from(value: Option<[u8; 16]>) -> Self {
+        match value {
+            Some(key) => Self::Key(key),
+            None => Self::ExpectNone,
+        }
+    }
 }
 
 fn validate_signature(
@@ -83,6 +96,7 @@ fn validate_signature(
 #[derive(Debug)]
 pub enum ReadError {
     NetBIOS,
+    NotSigned,
     InvalidSignature,
     InvalidlySignedMessage,
     Connection(std::io::Error),
@@ -91,10 +105,13 @@ pub enum ReadError {
 pub fn write_202_message<W: Write, M: MessageBody>(
     mut w: W,
     sign_with_key: Option<[u8; 16]>,
-    header: &SyncHeader202Outgoing,
+    mut header: SyncHeader202Outgoing,
     body: &M,
 ) -> Result<(), WriteError> {
     let mut buffer = Vec::with_capacity(64 + body.size_hint());
+    if sign_with_key.is_some() {
+        header.flags |= FLAG_SIGNED;
+    }
     buffer.write_all(&header.to_bytes()).unwrap();
     body.write_to(&mut buffer).unwrap();
     match buffer.len() {
