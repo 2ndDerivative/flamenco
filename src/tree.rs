@@ -38,7 +38,7 @@ impl TreeConnection<'_, '_, '_> {
             .requires_signing()
             .then_some(session.session_key())
             .copied();
-        // TODO path length check
+        // TODO path length and invalid characters check
         write_202_message(
             &mut session.connection.tcp,
             session_key,
