@@ -13,6 +13,7 @@ use crate::{
 
 pub struct TreeConnection<'con, 'cred> {
     session: &'con mut Session202<'con, 'cred>,
+    id: u32,
 }
 impl TreeConnection<'_, '_> {
     pub fn new<'con, 'cred>(
@@ -48,6 +49,32 @@ impl TreeConnection<'_, '_> {
         let response = TreeConnectResponse::read_from(Cursor::new(msg)).unwrap();
         dbg!(response);
         todo!()
+    }
+    pub fn disconnect(self) {
+        drop(self)
+    }
+}
+impl Drop for TreeConnection<'_, '_> {
+    fn drop(&mut self) {
+        let message_id = self.session.connection.fetch_increment_message_id();
+        let header = SyncHeader202Outgoing {
+            command: Command202::TreeDisconnect,
+            credits: 0,
+            flags: 0,
+            next_command: None,
+            message_id,
+            tree_id: self.id,
+            session_id: self.session.id,
+        };
+        let session = &mut self.session;
+        let key = session.requires_signing().then_some(*session.session_key());
+        let _ = write_202_message(
+            &mut session.connection.tcp,
+            key,
+            header,
+            &TreeDisconnectRequest,
+        );
+        let _ = read_202_message(&mut session.connection.tcp, Validation::from(key));
     }
 }
 
@@ -161,4 +188,23 @@ pub enum ShareType {
     Disk,
     Pipe,
     Printer,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TreeDisconnectRequest;
+impl TreeDisconnectRequest {
+    fn write_into<W: Write>(self, mut w: W) -> Result<(), std::io::Error> {
+        w.write_all(&4u16.to_le_bytes())?;
+        w.write_all(&0u16.to_le_bytes())?;
+        Ok(())
+    }
+}
+impl MessageBody for TreeDisconnectRequest {
+    type Err = std::io::Error;
+    fn size_hint(&self) -> usize {
+        8
+    }
+    fn write_to<W: Write>(&self, w: W) -> Result<(), Self::Err> {
+        (*self).write_into(w)
+    }
 }
