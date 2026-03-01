@@ -26,16 +26,7 @@ impl TreeConnection<'_, '_, '_> {
         session: &'session mut Session202<'con, 'cred>,
         path: &str,
     ) -> Result<TreeConnection<'session, 'con, 'cred>, TreeConnectError> {
-        let message_id = session.connection.fetch_increment_message_id();
-        let tc_header = SyncHeader202Outgoing {
-            command: Command202::TreeConnect,
-            credits: 0,
-            flags: 0,
-            next_command: None,
-            message_id,
-            tree_id: 0,
-            session_id: session.id,
-        };
+        let tc_header = SyncHeader202Outgoing::from_session(session, Command202::TreeConnect);
         let session_key = session
             .requires_signing()
             .then_some(session.session_key())
@@ -67,18 +58,17 @@ impl TreeConnection<'_, '_, '_> {
         drop(self)
     }
 }
+impl<'session, 'con, 'cred> TreeConnection<'session, 'con, 'cred> {
+    pub(crate) fn session_mut(&mut self) -> &mut Session202<'con, 'cred> {
+        self.session
+    }
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+}
 impl Drop for TreeConnection<'_, '_, '_> {
     fn drop(&mut self) {
-        let message_id = self.session.connection.fetch_increment_message_id();
-        let header = SyncHeader202Outgoing {
-            command: Command202::TreeDisconnect,
-            credits: 0,
-            flags: 0,
-            next_command: None,
-            message_id,
-            tree_id: self.id,
-            session_id: self.session.id,
-        };
+        let header = SyncHeader202Outgoing::from_tree_con(self, Command202::TreeDisconnect);
         let session = &mut self.session;
         let key = session.requires_signing().then_some(*session.session_key());
         let _ = write_202_message(

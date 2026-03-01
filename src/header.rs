@@ -1,5 +1,7 @@
 use std::num::NonZero;
 
+use crate::{session::Session202, tree::TreeConnection};
+
 const PROTOCOL_ID: [u8; 4] = [0xFE, b'S', b'M', b'B'];
 
 pub(crate) const FLAG_SIGNED: u32 = 0x08;
@@ -15,6 +17,27 @@ pub struct SyncHeader202Outgoing {
     pub session_id: u64,
 }
 impl SyncHeader202Outgoing {
+    pub fn from_session(session: &mut Session202<'_, '_>, command: Command202) -> Self {
+        let message_id = session.connection.fetch_increment_message_id();
+        Self {
+            command,
+            credits: 0,
+            flags: if session.requires_signing() {
+                FLAG_SIGNED
+            } else {
+                0
+            },
+            next_command: None,
+            message_id,
+            tree_id: 0,
+            session_id: session.id,
+        }
+    }
+    pub fn from_tree_con(tree_con: &mut TreeConnection<'_, '_, '_>, command: Command202) -> Self {
+        let mut header = Self::from_session(tree_con.session_mut(), command);
+        header.tree_id = tree_con.id();
+        header
+    }
     pub fn to_bytes(&self) -> [u8; 64] {
         let mut bytes = [0u8; 64];
         bytes[0..4].copy_from_slice(&PROTOCOL_ID);
