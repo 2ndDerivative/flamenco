@@ -16,7 +16,8 @@ use crate::{
 pub struct TreeConnection<'session, 'con, 'cred> {
     session: &'session mut Session202<'con, 'cred>,
     share_type: ShareType,
-    capabilities: u32,
+    /// There are no valid flags in 202 besides the SMB2_SHARE_CAP_DFS
+    dfs_capability: bool,
     id: u32,
 }
 impl TreeConnection<'_, '_, '_> {
@@ -54,7 +55,8 @@ impl TreeConnection<'_, '_, '_> {
         Ok(TreeConnection {
             session,
             share_type: response.share_type,
-            capabilities: response.capabilities,
+            // Ignore all other capabilities for now (since it's 202)
+            dfs_capability: response.capabilities & 0x08 != 0,
             id: header.tree_id,
         })
     }
