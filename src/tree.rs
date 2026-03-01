@@ -82,7 +82,12 @@ impl Drop for TreeConnection<'_, '_, '_> {
             header,
             &TreeDisconnectRequest,
         );
-        let _ = read_202_message(&mut session.connection.tcp, Validation::from(key));
+        let Ok((_header, body)) =
+            read_202_message(&mut session.connection.tcp, Validation::from(key))
+        else {
+            return;
+        };
+        let _ = TreeDisconnectResponse::read_from(body.as_ref());
     }
 }
 
@@ -231,5 +236,27 @@ impl MessageBody for TreeDisconnectRequest {
     }
     fn write_to<W: Write>(&self, w: W) -> Result<(), Self::Err> {
         (*self).write_into(w)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TreeDisconnectResponse;
+impl TreeDisconnectResponse {
+    fn read_from<R: Read>(mut r: R) -> Result<Self, ReadDisconnectError> {
+        if r.read_u16()? != 4 {
+            return Err(ReadDisconnectError::InvalidSize);
+        };
+        let _ignored = r.read_u16()?;
+        Ok(Self)
+    }
+}
+#[derive(Debug)]
+enum ReadDisconnectError {
+    Io(std::io::Error),
+    InvalidSize,
+}
+impl From<std::io::Error> for ReadDisconnectError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
     }
 }
