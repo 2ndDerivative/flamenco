@@ -10,6 +10,7 @@ fn main() {
     let own_spn = std::env::var("FLAMENCO_TEST_SPN").ok();
     let target_spn = std::env::var("FLAMENCO_TEST_TARGET_SPN").ok();
     let share_path = std::env::var("FLAMENCO_TEST_SHARE_PATH").unwrap();
+    let file_path = std::env::var("FLAMENCO_TEST_FILE").unwrap();
     let client = Client202::new(true);
     let credentials = Credentials::new(own_spn.as_deref()).unwrap();
     let mut con = client.connect(server).unwrap();
@@ -17,6 +18,6 @@ fn main() {
         .setup_session(&credentials, target_spn.as_deref())
         .unwrap();
     let mut tree = session.tree_connect(&share_path).unwrap();
-    let _file = tree.open_file("21_Softwareentwicklung\\smb-test.txt");
+    let _file = tree.open_file(&file_path);
     std::thread::sleep(Duration::from_millis(200));
 }
