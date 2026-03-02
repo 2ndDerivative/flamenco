@@ -1,5 +1,5 @@
 use std::{
-    io::{Read, Write},
+    io::{Cursor, Read, Write},
     num::NonZero,
     ops::BitOr,
 };
@@ -7,13 +7,17 @@ use std::{
 use crate::{
     ReadLe,
     error::{ErrorResponse2, ServerError},
-    file::close::{CloseRequest, CloseResponse},
+    file::{
+        close::{CloseRequest, CloseResponse},
+        read::{ReadFileError, ReadRequest, ReadResponse},
+    },
     header::{Command202, SyncHeader202Outgoing},
     message::{MessageBody, Validation, read_202_message, write_202_message},
     tree::TreeConnection,
 };
 
 mod close;
+mod read;
 
 #[derive(Debug)]
 pub struct FileHandle<'client, 'con, 'cred, 'session, 'tree> {
@@ -64,7 +68,7 @@ impl FileHandle<'_, '_, '_, '_, '_> {
             attributes,
             id,
         } = CreateResponse::read_from(body.as_ref()).unwrap();
-        Ok(FileHandle {
+        Ok(dbg!(FileHandle {
             tree_connection,
             id,
             allocation_size,
@@ -73,7 +77,44 @@ impl FileHandle<'_, '_, '_, '_, '_> {
             last_access_time,
             last_write_time,
             change_time,
-        })
+        }))
+    }
+    pub fn read_raw(
+        &mut self,
+        offset: u64,
+        length: u32,
+        minimum_count: u32,
+    ) -> Result<Box<[u8]>, ReadFileError> {
+        let mut header =
+            SyncHeader202Outgoing::from_tree_con(self.tree_connection, Command202::Read);
+        header.credits = 1;
+        let session = self.tree_connection.session_mut();
+        let key = session
+            .requires_signing()
+            .then_some(session.session_key())
+            .copied();
+        write_202_message(
+            &mut session.connection.tcp,
+            key,
+            header,
+            &ReadRequest {
+                extra_padding: 0,
+                length,
+                offset,
+                id: self.id,
+                minimum_count,
+            },
+        )
+        .unwrap();
+        let (header, body) =
+            read_202_message(&mut session.connection.tcp, Validation::from(key)).unwrap();
+        if let Some(code) = NonZero::new(header.status) {
+            return Err(ServerError::handle_error_body(dbg!(code), &body));
+        }
+        let buffer = ReadResponse::read_from(Cursor::new(body))
+            .unwrap()
+            .into_inner();
+        Ok(buffer)
     }
     fn send_close(&mut self) -> Result<(), std::io::Error> {
         let header = SyncHeader202Outgoing::from_tree_con(self.tree_connection, Command202::Close);
@@ -95,7 +136,6 @@ impl FileHandle<'_, '_, '_, '_, '_> {
             panic!("Error with code {code}");
         }
         let body = CloseResponse::read_from(body.as_ref()).unwrap();
-        dbg!(body);
         Ok(())
     }
     pub fn close(mut self) -> Result<(), std::io::Error> {

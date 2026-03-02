@@ -18,6 +18,7 @@ fn main() {
         .setup_session(&credentials, target_spn.as_deref())
         .unwrap();
     let mut tree = session.tree_connect(&share_path).unwrap();
-    let _file = tree.open_file(&file_path);
+    let mut file = tree.open_file(&file_path).unwrap();
+    dbg!(String::from_utf8(file.read_raw(0, 10, 0).unwrap().to_vec()).unwrap());
     std::thread::sleep(Duration::from_millis(200));
 }
