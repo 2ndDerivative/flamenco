@@ -27,11 +27,6 @@ trait ReadLe: Read {
         self.read_exact(&mut bytes)?;
         Ok(u64::from_le_bytes(bytes))
     }
-    fn read_u128(&mut self) -> std::io::Result<u128> {
-        let mut bytes = [0; 16];
-        self.read_exact(&mut bytes)?;
-        Ok(u128::from_le_bytes(bytes))
-    }
 }
 impl<T: Read> ReadLe for T {}
 
