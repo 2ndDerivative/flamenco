@@ -12,7 +12,6 @@ use crate::{
 
 #[derive(Debug)]
 pub struct ReadRequest {
-    pub extra_padding: u8,
     pub length: u32,
     pub offset: u64,
     pub id: FileId,
@@ -22,7 +21,7 @@ impl ReadRequest {
     const STRUCTURE_SIZE: u16 = 49;
     pub fn write_into<W: Write>(&self, mut w: W) -> Result<(), std::io::Error> {
         w.write_all(&Self::STRUCTURE_SIZE.to_le_bytes())?;
-        w.write_all(&[self.extra_padding + 64 + 16])?;
+        w.write_all(&[64 + 16])?;
         w.write_all(&[0])?;
         w.write_all(&self.length.to_le_bytes())?;
         w.write_all(&self.offset.to_le_bytes())?;

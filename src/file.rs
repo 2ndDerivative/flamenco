@@ -100,7 +100,6 @@ impl FileHandle<'_, '_, '_, '_> {
             key,
             header,
             &ReadRequest {
-                extra_padding: 0,
                 length,
                 offset,
                 id: self.id,
