@@ -22,6 +22,7 @@ impl ReadRequest {
     pub fn write_into<W: Write>(&self, mut w: W) -> Result<(), std::io::Error> {
         w.write_all(&Self::STRUCTURE_SIZE.to_le_bytes())?;
         w.write_all(&[64 + 16])?;
+        // in 2.0.2, 2.1 and 3.0 this field must not be used
         w.write_all(&[0])?;
         w.write_all(&self.length.to_le_bytes())?;
         w.write_all(&self.offset.to_le_bytes())?;
