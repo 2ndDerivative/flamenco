@@ -33,7 +33,6 @@ pub struct Session202<'client, 'con> {
 impl Debug for Session202<'_, '_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Session202")
-            .field("cred", &"Credentials")
             .field("session_key", &"REDACTED")
             .field("id", &self.id)
             .field("connection", &self.connection)
