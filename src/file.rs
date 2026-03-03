@@ -20,8 +20,8 @@ mod close;
 mod read;
 
 #[derive(Debug)]
-pub struct FileHandle<'client, 'con, 'cred, 'session, 'tree> {
-    tree_connection: &'tree mut TreeConnection<'client, 'con, 'cred, 'session>,
+pub struct FileHandle<'client, 'con, 'session, 'tree> {
+    tree_connection: &'tree mut TreeConnection<'client, 'con, 'session>,
     id: FileId,
     oplock_level: Option<OplockLevel202>,
     allocation_size: u64,
@@ -31,11 +31,11 @@ pub struct FileHandle<'client, 'con, 'cred, 'session, 'tree> {
     last_write_time: u64,
     change_time: u64,
 }
-impl FileHandle<'_, '_, '_, '_, '_> {
-    pub(crate) fn new<'tree, 'client, 'con, 'cred, 'session>(
-        tree_connection: &'tree mut TreeConnection<'client, 'con, 'cred, 'session>,
+impl FileHandle<'_, '_, '_, '_> {
+    pub(crate) fn new<'tree, 'client, 'con, 'session>(
+        tree_connection: &'tree mut TreeConnection<'client, 'con, 'session>,
         path: &str,
-    ) -> Result<FileHandle<'client, 'con, 'cred, 'session, 'tree>, OpenError> {
+    ) -> Result<FileHandle<'client, 'con, 'session, 'tree>, OpenError> {
         let header = SyncHeader202Outgoing::from_tree_con(tree_connection, Command202::Create);
         let request_body = FileCreateRequest {
             oplock_level: None,
@@ -144,7 +144,7 @@ impl FileHandle<'_, '_, '_, '_, '_> {
         self.send_close()
     }
 }
-impl Drop for FileHandle<'_, '_, '_, '_, '_> {
+impl Drop for FileHandle<'_, '_, '_, '_> {
     fn drop(&mut self) {
         let _ = self.send_close();
     }

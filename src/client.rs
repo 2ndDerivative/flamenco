@@ -108,11 +108,11 @@ impl Connection<'_> {
     }
 }
 impl<'client> Connection<'client> {
-    pub fn setup_session<'con, 'cred>(
+    pub fn setup_session<'con>(
         &'con mut self,
-        credentials: &'cred Credentials<Outbound>,
+        credentials: &Credentials<Outbound>,
         target_spn: Option<&str>,
-    ) -> Result<Session202<'client, 'con, 'cred>, SessionSetupError> {
+    ) -> Result<Session202<'client, 'con>, SessionSetupError> {
         Session202::new(self, credentials, target_spn)
     }
 }
