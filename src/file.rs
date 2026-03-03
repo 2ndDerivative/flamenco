@@ -258,6 +258,17 @@ impl AccessMask {
     const EXECUTE: Self = Self(0x20);
     const READ_ATTRIBUTES: Self = Self(0x80);
     const WRITE_ATTRIBUTES: Self = Self(0x100);
+    const DELETE: Self = Self(0x10000);
+    const READ_CONTROL: Self = Self(0x20000);
+    const WRITE_DAC: Self = Self(0x40000);
+    const WRITE_OWNER: Self = Self(0x80000);
+    const SYNCHRONIZE: Self = Self(0x100000);
+    const ACCESS_SYSTEM_SECURITY: Self = Self(0x1000000);
+    const MAXIMUM_ALLOWED: Self = Self(0x2000000);
+    const GENERIC_ALL: Self = Self(0x10000000);
+    const GENERIC_EXECUTE: Self = Self(0x20000000);
+    const GENERIC_WRITE: Self = Self(0x40000000);
+    const GENERIC_READ: Self = Self(0x80000000);
 
     pub fn empty() -> Self {
         Self::default()
