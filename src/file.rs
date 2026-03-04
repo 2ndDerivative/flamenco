@@ -31,7 +31,7 @@ mod read;
 pub struct FileHandle<
     'tree,
     Session: Borrow<Session202<Con, Stream, Client>>,
-    Con: Borrow<Connection<Stream, Client>>,
+    Con: Borrow<Connection<Client, Stream>>,
     Stream: Access<TcpStream>,
     Client,
 > {
@@ -48,7 +48,7 @@ pub struct FileHandle<
 }
 impl<
     Session: Borrow<Session202<Con, Stream, Client>>,
-    Con: Borrow<Connection<Stream, Client>>,
+    Con: Borrow<Connection<Client, Stream>>,
     Stream: Access<TcpStream>,
     Client,
 > FileHandle<'_, Session, Con, Stream, Client>
@@ -185,7 +185,7 @@ impl<
 }
 impl<
     Session: Borrow<Session202<Con, Stream, Client>>,
-    Con: Borrow<Connection<Stream, Client>>,
+    Con: Borrow<Connection<Client, Stream>>,
     Stream: Access<TcpStream>,
     Client,
 > Drop for FileHandle<'_, Session, Con, Stream, Client>
@@ -196,7 +196,7 @@ impl<
 }
 impl<
     Session: Borrow<Session202<Con, Stream, Client>>,
-    Con: Borrow<Connection<Stream, Client>>,
+    Con: Borrow<Connection<Client, Stream>>,
     Stream: Access<TcpStream>,
     Client,
 > Read for FileHandle<'_, Session, Con, Stream, Client>
@@ -234,7 +234,7 @@ impl<
 }
 impl<
     Session: Borrow<Session202<Con, Stream, Client>>,
-    Con: Borrow<Connection<Stream, Client>>,
+    Con: Borrow<Connection<Client, Stream>>,
     Stream: Access<TcpStream>,
     Client,
 > Seek for FileHandle<'_, Session, Con, Stream, Client>

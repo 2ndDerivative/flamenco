@@ -30,7 +30,7 @@ use crate::{
 const ERROR_MORE_PROCESSING_REQUIRED: u32 = 0xC0000016;
 
 pub struct Session202<
-    ConAccess: Borrow<Connection<Stream, Client>>,
+    ConAccess: Borrow<Connection<Client, Stream>>,
     Stream: Access<TcpStream>,
     Client,
 > {
@@ -41,7 +41,7 @@ pub struct Session202<
     requires_signing: bool,
     _marker: PhantomData<(Stream, Client)>,
 }
-impl<Con: Borrow<Connection<Stream, Client>> + Debug, Stream: Access<TcpStream>, Client> Debug
+impl<Con: Borrow<Connection<Client, Stream>> + Debug, Stream: Access<TcpStream>, Client> Debug
     for Session202<Con, Stream, Client>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -53,7 +53,7 @@ impl<Con: Borrow<Connection<Stream, Client>> + Debug, Stream: Access<TcpStream>,
             .finish()
     }
 }
-impl<Con: Borrow<Connection<Stream, Client>>, Stream: Access<TcpStream>, Client>
+impl<Con: Borrow<Connection<Client, Stream>>, Stream: Access<TcpStream>, Client>
     Session202<Con, Stream, Client>
 {
     pub fn requires_signing(&self) -> bool {
@@ -66,7 +66,7 @@ impl<Con: Borrow<Connection<Stream, Client>>, Stream: Access<TcpStream>, Client>
         drop(self);
     }
 }
-impl<Con: Borrow<Connection<Stream, Client>>, Stream: Access<TcpStream>, Client: Borrow<Client202>>
+impl<Con: Borrow<Connection<Client, Stream>>, Stream: Access<TcpStream>, Client: Borrow<Client202>>
     Session202<Con, Stream, Client>
 {
     pub fn new(
@@ -159,7 +159,7 @@ impl<Con: Borrow<Connection<Stream, Client>>, Stream: Access<TcpStream>, Client:
         }
     }
 }
-impl<Con: Borrow<Connection<Stream, Client>>, Stream: Access<TcpStream>, Client: Borrow<Client202>>
+impl<Con: Borrow<Connection<Client, Stream>>, Stream: Access<TcpStream>, Client: Borrow<Client202>>
     Session202<Con, Stream, Client>
 {
     pub fn tree_connect<'session>(
@@ -172,7 +172,7 @@ impl<Con: Borrow<Connection<Stream, Client>>, Stream: Access<TcpStream>, Client:
         TreeConnection::new(self, share_path)
     }
 }
-impl<Con: Borrow<Connection<Stream, Client>>, Stream: Access<TcpStream>, Client> Drop
+impl<Con: Borrow<Connection<Client, Stream>>, Stream: Access<TcpStream>, Client> Drop
     for Session202<Con, Stream, Client>
 {
     fn drop(&mut self) {

@@ -24,7 +24,7 @@ use crate::{
 #[derive(Debug)]
 pub struct TreeConnection<
     Session: Borrow<Session202<Con, Stream, Client>>,
-    Con: Borrow<Connection<Stream, Client>>,
+    Con: Borrow<Connection<Client, Stream>>,
     Stream: Access<TcpStream>,
     Client,
 > {
@@ -37,7 +37,7 @@ pub struct TreeConnection<
 }
 impl<
     Session: Borrow<Session202<Con, Stream, Client>>,
-    Con: Borrow<Connection<Stream, Client>>,
+    Con: Borrow<Connection<Client, Stream>>,
     Stream: Access<TcpStream>,
     Client: Borrow<Client202>,
 > TreeConnection<Session, Con, Stream, Client>
@@ -88,7 +88,7 @@ impl<
 }
 impl<
     Session: Borrow<Session202<Con, Stream, Client>>,
-    Con: Borrow<Connection<Stream, Client>>,
+    Con: Borrow<Connection<Client, Stream>>,
     Stream: Access<TcpStream>,
     Client,
 > TreeConnection<Session, Con, Stream, Client>
@@ -102,7 +102,7 @@ impl<
 }
 impl<
     Session: Borrow<Session202<Con, Stream, Client>>,
-    Con: Borrow<Connection<Stream, Client>>,
+    Con: Borrow<Connection<Client, Stream>>,
     Stream: Access<TcpStream>,
     Client,
 > TreeConnection<Session, Con, Stream, Client>
@@ -116,7 +116,7 @@ impl<
 }
 impl<
     Session: Borrow<Session202<Con, Stream, Client>>,
-    Con: Borrow<Connection<Stream, Client>>,
+    Con: Borrow<Connection<Client, Stream>>,
     Stream: Access<TcpStream>,
     Client,
 > Drop for TreeConnection<Session, Con, Stream, Client>

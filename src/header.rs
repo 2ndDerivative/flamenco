@@ -19,7 +19,7 @@ pub struct SyncHeader202Outgoing {
 impl SyncHeader202Outgoing {
     pub fn from_session<
         Session: Borrow<Session202<Con, Stream, Client>>,
-        Con: Borrow<Connection<Stream, Client>>,
+        Con: Borrow<Connection<Client, Stream>>,
         Stream: Access<TcpStream>,
         Client,
     >(
@@ -43,7 +43,7 @@ impl SyncHeader202Outgoing {
     }
     pub fn from_tree_con<
         Session: Borrow<Session202<Con, Stream, Client>>,
-        Con: Borrow<Connection<Stream, Client>>,
+        Con: Borrow<Connection<Client, Stream>>,
         Stream: Access<TcpStream>,
         Client,
     >(

@@ -44,13 +44,13 @@ impl Client202 {
     pub fn connect(
         &self,
         addr: impl ToSocketAddrs,
-    ) -> Result<Connection<RefCell<TcpStream>, &Client202>, ConnectError> {
+    ) -> Result<Connection<&Client202, RefCell<TcpStream>>, ConnectError> {
         Client202::connect_with(self, addr)
     }
     pub fn connect_with<Client: Borrow<Self>, Stream: Access<TcpStream>>(
         client: Client,
         addr: impl ToSocketAddrs,
-    ) -> Result<Connection<Stream, Client>, ConnectError> {
+    ) -> Result<Connection<Client, Stream>, ConnectError> {
         let mut tcp = TcpStream::connect(addr)?;
         let neg_header = SyncHeader202Outgoing {
             command: Command202::Negotiate,
@@ -101,7 +101,7 @@ impl Client202 {
 }
 
 #[derive(Debug)]
-pub struct Connection<Stream, Client> {
+pub struct Connection<Client, Stream> {
     pub(crate) client: Client,
     message_id: AtomicU64,
     tcp: Stream,
@@ -110,7 +110,7 @@ pub struct Connection<Stream, Client> {
     max_write_size: u32,
     server_requires_signing: bool,
 }
-impl<Stream, Client> Connection<Stream, Client> {
+impl<Stream, Client> Connection<Client, Stream> {
     pub(crate) fn fetch_increment_message_id(&self) -> u64 {
         self.message_id.fetch_add(1, Ordering::Relaxed)
     }
@@ -118,17 +118,17 @@ impl<Stream, Client> Connection<Stream, Client> {
         self.server_requires_signing
     }
 }
-impl<Stream: Access<TcpStream>, Client> Connection<Stream, Client> {
+impl<Client, Stream: Access<TcpStream>> Connection<Client, Stream> {
     pub fn borrow_tcp(&self) -> Stream::Guard<'_> {
         self.tcp.lock_mut()
     }
 }
-impl<Stream: Access<TcpStream>, Client: Borrow<Client202>> Connection<Stream, Client> {
+impl<Stream: Access<TcpStream>, Client: Borrow<Client202>> Connection<Client, Stream> {
     pub fn setup_session<'con>(
         &'con self,
         credentials: &Credentials<Outbound>,
         target_spn: Option<&str>,
-    ) -> Result<Session202<&'con Connection<Stream, Client>, Stream, Client>, SessionSetupError>
+    ) -> Result<Session202<&'con Connection<Client, Stream>, Stream, Client>, SessionSetupError>
     {
         Session202::new(self, credentials, target_spn)
     }

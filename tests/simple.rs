@@ -1,10 +1,4 @@
-use std::{
-    cell::RefCell,
-    io::Read,
-    net::TcpStream,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{cell::RefCell, io::Read, net::TcpStream, sync::Arc, time::Duration};
 
 use flamenco::{client::Client202, session::Session202, tree::TreeConnection};
 use kenobi::cred::Credentials;
