@@ -36,7 +36,7 @@ pub struct FileHandle<'con, 'session, 'tree, Client> {
     change_time: u64,
 }
 impl<Client> FileHandle<'_, '_, '_, Client> {
-    pub(crate) fn new<'tree, 'client, 'con, 'session>(
+    pub(crate) fn new<'tree, 'con, 'session>(
         tree_connection: &'tree mut TreeConnection<'con, 'session, Client>,
         path: &str,
     ) -> Result<FileHandle<'con, 'session, 'tree, Client>, OpenError> {
