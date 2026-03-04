@@ -9,10 +9,13 @@ use crate::{
     error::{ErrorResponse2, ServerError},
     file::{
         close::{CloseRequest, CloseResponse},
-        read::{ReadFileError, ReadRequest, ReadResponse},
+        read::{ReadFileError, ReadRequest, ReadResponse, ReadResponseError},
     },
     header::{Command202, SyncHeader202Outgoing},
-    message::{MessageBody, Validation, read_202_message, write_202_message},
+    message::{
+        MessageBody, ReadError as MsgReadError, Validation, WriteError, read_202_message,
+        write_202_message,
+    },
     tree::TreeConnection,
 };
 
@@ -116,16 +119,26 @@ impl FileHandle<'_, '_, '_, '_> {
             },
             true,
         )
-        .unwrap();
-        let (header, body) =
-            read_202_message(&mut session.connection.tcp, Validation::from(key)).unwrap();
+        .map_err(|e| match e {
+            WriteError::Connection(io) => ReadFileError::Io(io),
+            WriteError::MessageTooLong => ReadFileError::InvalidMessage,
+        })?;
+        let (header, body) = read_202_message(&mut session.connection.tcp, Validation::from(key))
+            .map_err(|e| match e {
+            MsgReadError::NetBIOS
+            | MsgReadError::NotSigned
+            | MsgReadError::InvalidSignature
+            | MsgReadError::InvalidlySignedMessage => ReadFileError::InvalidMessage,
+            MsgReadError::Connection(io) => ReadFileError::Io(io),
+        })?;
         if let Some(code) = NonZero::new(header.status) {
             return Err(ServerError::handle_error_body(code, &body));
         }
-        let buffer = ReadResponse::read_from(Cursor::new(body))
-            .unwrap()
-            .into_inner();
-        Ok(buffer)
+        match ReadResponse::read_from(Cursor::new(body)) {
+            Ok(ok) => Ok(ok.into_inner()),
+            Err(ReadResponseError::Io(io)) => Err(ReadFileError::Io(io)),
+            Err(ReadResponseError::InvalidMessage) => Err(ReadFileError::InvalidMessage),
+        }
     }
     fn send_close(&mut self) -> Result<(), std::io::Error> {
         let header = SyncHeader202Outgoing::from_tree_con(self.tree_connection, Command202::Close);
@@ -147,7 +160,7 @@ impl FileHandle<'_, '_, '_, '_> {
         if let Some(code) = NonZero::new(header.status) {
             panic!("Error with code {code}");
         }
-        let body = CloseResponse::read_from(body.as_ref()).unwrap();
+        let _body = CloseResponse::read_from(body.as_ref()).unwrap();
         Ok(())
     }
     pub fn close(mut self) -> Result<(), std::io::Error> {
