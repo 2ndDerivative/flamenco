@@ -46,10 +46,8 @@ impl<
         session: Session,
         path: &str,
     ) -> Result<TreeConnection<Session, Con, Stream, Client>, TreeConnectError> {
-        let tc_header = SyncHeader202Outgoing::from_session::<_, _, _>(
-            session.borrow(),
-            Command202::TreeConnect,
-        );
+        let tc_header =
+            SyncHeader202Outgoing::from_session(session.borrow(), Command202::TreeConnect);
         let session_key = session
             .borrow()
             .requires_signing()

@@ -49,7 +49,7 @@ impl SyncHeader202Outgoing {
         tree_con: &TreeConnection<Session, Con, Stream, Client>,
         command: Command202,
     ) -> Self {
-        let header = Self::from_session::<_, _, _>(tree_con.session(), command);
+        let header = Self::from_session(tree_con.session(), command);
         Self {
             tree_id: tree_con.id(),
             ..header
