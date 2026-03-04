@@ -1,6 +1,6 @@
-use std::num::NonZero;
+use std::{borrow::Borrow, net::TcpStream, num::NonZero};
 
-use crate::{session::Session202, tree::TreeConnection};
+use crate::{client::Connection, session::Session202, sync::Access, tree::TreeConnection};
 
 const PROTOCOL_ID: [u8; 4] = [0xFE, b'S', b'M', b'B'];
 
@@ -17,8 +17,16 @@ pub struct SyncHeader202Outgoing {
     pub session_id: u64,
 }
 impl SyncHeader202Outgoing {
-    pub fn from_session<Client>(session: &mut Session202<'_, Client>, command: Command202) -> Self {
-        let message_id = session.connection.fetch_increment_message_id();
+    pub fn from_session<
+        Session: Borrow<Session202<Con, Stream, Client>>,
+        Con: Borrow<Connection<Stream, Client>>,
+        Stream: Access<TcpStream>,
+        Client,
+    >(
+        session: &Session202<Con, Stream, Client>,
+        command: Command202,
+    ) -> Self {
+        let message_id = session.connection.borrow().fetch_increment_message_id();
         Self {
             command,
             credits: 0,
@@ -33,11 +41,16 @@ impl SyncHeader202Outgoing {
             session_id: session.id,
         }
     }
-    pub fn from_tree_con<Client>(
-        tree_con: &mut TreeConnection<'_, '_, Client>,
+    pub fn from_tree_con<
+        Session: Borrow<Session202<Con, Stream, Client>>,
+        Con: Borrow<Connection<Stream, Client>>,
+        Stream: Access<TcpStream>,
+        Client,
+    >(
+        tree_con: &TreeConnection<Session, Con, Stream, Client>,
         command: Command202,
     ) -> Self {
-        let header = Self::from_session(tree_con.session_mut(), command);
+        let header = Self::from_session::<Session, _, _, _>(tree_con.session(), command);
         Self {
             tree_id: tree_con.id(),
             ..header
