@@ -194,6 +194,26 @@ impl Read for FileHandle<'_, '_, '_, '_> {
             }
         }
     }
+    fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+        let len = buf.len().try_into().unwrap_or(u32::MAX);
+        match self.read_raw(len, len) {
+            Ok(outbuf) => {
+                assert!(outbuf.len() <= len as usize);
+                self.offset += outbuf.len() as u64;
+                buf.copy_from_slice(&outbuf);
+                Ok(())
+            }
+            Err(ReadFileError::InvalidMessage) => Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                "server sent an invalid message",
+            )),
+            Err(ReadFileError::Io(io)) => Err(io),
+            Err(ReadFileError::ServerError { code, body }) => {
+                dbg!(code, body);
+                Err(std::io::Error::other("server sent a protocol error"))
+            }
+        }
+    }
 }
 impl Seek for FileHandle<'_, '_, '_, '_> {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
