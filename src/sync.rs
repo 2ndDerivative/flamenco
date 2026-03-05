@@ -4,34 +4,38 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
-pub trait Access<T> {
-    type Guard<'g>: DerefMut<Target = T>
+use crate::client::ConnectionInner;
+
+pub trait Access {
+    type Guard<'g>: DerefMut<Target = ConnectionInner>
     where
         Self: 'g;
     fn lock_mut(&self) -> Self::Guard<'_>;
-    fn new(t: T) -> Self;
+    fn new(t: ConnectionInner) -> Self;
 }
-impl<T> Access<T> for Mutex<T> {
+pub type ConnectionMutex = Mutex<ConnectionInner>;
+impl Access for Mutex<ConnectionInner> {
     type Guard<'g>
-        = MutexGuard<'g, T>
+        = MutexGuard<'g, ConnectionInner>
     where
         Self: 'g;
     fn lock_mut(&self) -> Self::Guard<'_> {
         self.lock().unwrap()
     }
-    fn new(t: T) -> Self {
+    fn new(t: ConnectionInner) -> Self {
         Self::new(t)
     }
 }
-impl<T> Access<T> for RefCell<T> {
+pub type ConnectionRefCell = RefCell<ConnectionInner>;
+impl Access for RefCell<ConnectionInner> {
     type Guard<'g>
-        = RefMut<'g, T>
+        = RefMut<'g, ConnectionInner>
     where
         Self: 'g;
     fn lock_mut(&self) -> Self::Guard<'_> {
         self.borrow_mut()
     }
-    fn new(t: T) -> Self {
+    fn new(t: ConnectionInner) -> Self {
         Self::new(t)
     }
 }

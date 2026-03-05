@@ -54,7 +54,7 @@ pub fn read_202_message<R: Read>(
                     Err(ReadError::InvalidSignature)
                 }
             } else {
-                Err(ReadError::InvalidlySignedMessage)
+                Ok((header, message_body))
             }
         }
         Validation::ExpectNone if !is_signed && header.signature == [0u8; 16] => {

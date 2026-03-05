@@ -3,9 +3,7 @@ use std::{
     fmt::Debug,
     io::{Cursor, ErrorKind, Read, Seek, SeekFrom, Write},
     marker::PhantomData,
-    net::TcpStream,
     num::NonZero,
-    ops::DerefMut,
 };
 
 use kenobi::{
@@ -29,11 +27,7 @@ use crate::{
 
 const ERROR_MORE_PROCESSING_REQUIRED: u32 = 0xC0000016;
 
-pub struct Session202<
-    ConAccess: Borrow<Connection<Client, Stream>>,
-    Stream: Access<TcpStream>,
-    Client,
-> {
+pub struct Session202<ConAccess: Borrow<Connection<Client, Stream>>, Stream: Access, Client> {
     session_key: [u8; 16],
     pub(crate) id: u64,
     pub(crate) connection: ConAccess,
@@ -41,7 +35,7 @@ pub struct Session202<
     requires_signing: bool,
     _marker: PhantomData<(Stream, Client)>,
 }
-impl<Con: Borrow<Connection<Client, Stream>> + Debug, Stream: Access<TcpStream>, Client> Debug
+impl<Con: Borrow<Connection<Client, Stream>> + Debug, Stream: Access, Client> Debug
     for Session202<Con, Stream, Client>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -53,7 +47,7 @@ impl<Con: Borrow<Connection<Client, Stream>> + Debug, Stream: Access<TcpStream>,
             .finish()
     }
 }
-impl<Con: Borrow<Connection<Client, Stream>>, Stream: Access<TcpStream>, Client>
+impl<Con: Borrow<Connection<Client, Stream>>, Stream: Access, Client>
     Session202<Con, Stream, Client>
 {
     pub fn requires_signing(&self) -> bool {
@@ -66,7 +60,7 @@ impl<Con: Borrow<Connection<Client, Stream>>, Stream: Access<TcpStream>, Client>
         drop(self);
     }
 }
-impl<Con: Borrow<Connection<Client, Stream>>, Stream: Access<TcpStream>, Client: Borrow<Client202>>
+impl<Con: Borrow<Connection<Client, Stream>>, Stream: Access, Client: Borrow<Client202>>
     Session202<Con, Stream, Client>
 {
     pub fn new(
@@ -83,7 +77,9 @@ impl<Con: Borrow<Connection<Client, Stream>>, Stream: Access<TcpStream>, Client:
         };
         let mut session_id = 0;
         loop {
-            let message_id = connection.borrow().fetch_increment_message_id();
+            let client = connection.borrow().client.borrow();
+            let mut connection_lock = connection.borrow().inner.lock_mut();
+            let message_id = connection_lock.fetch_increment_message_id();
             let header = SyncHeader202Outgoing {
                 command: Command202::SessionSetup,
                 credits: 256,
@@ -93,7 +89,6 @@ impl<Con: Borrow<Connection<Client, Stream>>, Stream: Access<TcpStream>, Client:
                 tree_id: 0,
                 session_id,
             };
-            let client = connection.borrow().client.borrow();
             let body = SessionSetupRequest {
                 security_mode: if client.requires_signing {
                     SecurityMode::SigningRequired
@@ -104,9 +99,8 @@ impl<Con: Borrow<Connection<Client, Stream>>, Stream: Access<TcpStream>, Client:
                 previous_session_id: 0,
                 buffer: auth_context.next_token(),
             };
-            let mut connection_lock = connection.borrow().borrow_tcp();
-            write_202_message(connection_lock.deref_mut(), None, header, &body, false)?;
-            let message_buffer = buffer_for_delayed_validation(connection_lock.deref_mut())?;
+            write_202_message(connection_lock.stream_mut(), None, header, &body, false)?;
+            let message_buffer = buffer_for_delayed_validation(connection_lock.stream_mut())?;
             drop(connection_lock);
             let (header, body) = read_202_message(&mut message_buffer.as_ref(), Validation::Skip)?;
             // Lookup session ID
@@ -159,7 +153,7 @@ impl<Con: Borrow<Connection<Client, Stream>>, Stream: Access<TcpStream>, Client:
         }
     }
 }
-impl<Con: Borrow<Connection<Client, Stream>>, Stream: Access<TcpStream>, Client: Borrow<Client202>>
+impl<Con: Borrow<Connection<Client, Stream>>, Stream: Access, Client: Borrow<Client202>>
     Session202<Con, Stream, Client>
 {
     pub fn tree_connect<'session>(
@@ -172,23 +166,23 @@ impl<Con: Borrow<Connection<Client, Stream>>, Stream: Access<TcpStream>, Client:
         TreeConnection::new(self, share_path)
     }
 }
-impl<Con: Borrow<Connection<Client, Stream>>, Stream: Access<TcpStream>, Client> Drop
+impl<Con: Borrow<Connection<Client, Stream>>, Stream: Access, Client> Drop
     for Session202<Con, Stream, Client>
 {
     fn drop(&mut self) {
+        let mut lock = self.connection.borrow().inner.lock_mut();
         let logoff_header = SyncHeader202Outgoing {
             command: Command202::Logoff,
             credits: 0,
             flags: 0,
             next_command: None,
-            message_id: self.connection.borrow().fetch_increment_message_id(),
+            message_id: lock.fetch_increment_message_id(),
             tree_id: 0,
             session_id: self.id,
         };
         let key = self.requires_signing().then_some(self.session_key);
-        let mut lock = self.connection.borrow().borrow_tcp();
-        let _ = write_202_message(lock.deref_mut(), key, logoff_header, &LogoffRequest, false);
-        let _ = read_202_message(lock.deref_mut(), Validation::Key(self.session_key));
+        let _ = write_202_message(lock.stream_mut(), key, logoff_header, &LogoffRequest, false);
+        let _ = read_202_message(lock.stream_mut(), Validation::Key(self.session_key));
     }
 }
 

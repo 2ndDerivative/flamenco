@@ -1,4 +1,4 @@
-use std::{borrow::Borrow, net::TcpStream, num::NonZero};
+use std::{borrow::Borrow, num::NonZero};
 
 use crate::{client::Connection, session::Session202, sync::Access, tree::TreeConnection};
 
@@ -17,15 +17,16 @@ pub struct SyncHeader202Outgoing {
     pub session_id: u64,
 }
 impl SyncHeader202Outgoing {
-    pub fn from_session<
-        Con: Borrow<Connection<Client, Stream>>,
-        Stream: Access<TcpStream>,
-        Client,
-    >(
+    pub fn from_session<Con: Borrow<Connection<Client, Stream>>, Stream: Access, Client>(
         session: &Session202<Con, Stream, Client>,
         command: Command202,
     ) -> Self {
-        let message_id = session.connection.borrow().fetch_increment_message_id();
+        let message_id = session
+            .connection
+            .borrow()
+            .inner
+            .lock_mut()
+            .fetch_increment_message_id();
         Self {
             command,
             credits: 0,
@@ -43,7 +44,7 @@ impl SyncHeader202Outgoing {
     pub fn from_tree_con<
         Session: Borrow<Session202<Con, Stream, Client>>,
         Con: Borrow<Connection<Client, Stream>>,
-        Stream: Access<TcpStream>,
+        Stream: Access,
         Client,
     >(
         tree_con: &TreeConnection<Session, Con, Stream, Client>,

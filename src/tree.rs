@@ -2,9 +2,7 @@ use std::{
     borrow::Borrow,
     io::{Cursor, Read, Seek, Write},
     marker::PhantomData,
-    net::TcpStream,
     num::NonZero,
-    ops::DerefMut,
 };
 
 use crate::{
@@ -25,7 +23,7 @@ use crate::{
 pub struct TreeConnection<
     Session: Borrow<Session202<Con, Stream, Client>>,
     Con: Borrow<Connection<Client, Stream>>,
-    Stream: Access<TcpStream>,
+    Stream: Access,
     Client,
 > {
     session: Session,
@@ -38,7 +36,7 @@ pub struct TreeConnection<
 impl<
     Session: Borrow<Session202<Con, Stream, Client>>,
     Con: Borrow<Connection<Client, Stream>>,
-    Stream: Access<TcpStream>,
+    Stream: Access,
     Client: Borrow<Client202>,
 > TreeConnection<Session, Con, Stream, Client>
 {
@@ -56,16 +54,16 @@ impl<
         if let Err(e) = parse_share_path(path) {
             return Err(TreeConnectError::InvalidPath(e));
         };
-        let mut lock = session.borrow().connection.borrow().borrow_tcp();
+        let mut lock = session.borrow().connection.borrow().inner.lock_mut();
         write_202_message(
-            lock.deref_mut(),
+            lock.stream_mut(),
             session_key,
             tc_header,
             &TreeConnectRequest(path),
             false,
         )?;
         let (header, msg) =
-            read_202_message(lock.deref_mut(), Validation::from(session_key)).unwrap();
+            read_202_message(lock.stream_mut(), Validation::from(session_key)).unwrap();
         drop(lock);
         if let Some(code) = NonZero::new(header.status) {
             return Err(ServerError::handle_error_body(code, &msg));
@@ -87,7 +85,7 @@ impl<
 impl<
     Session: Borrow<Session202<Con, Stream, Client>>,
     Con: Borrow<Connection<Client, Stream>>,
-    Stream: Access<TcpStream>,
+    Stream: Access,
     Client,
 > TreeConnection<Session, Con, Stream, Client>
 {
@@ -101,7 +99,7 @@ impl<
 impl<
     Session: Borrow<Session202<Con, Stream, Client>>,
     Con: Borrow<Connection<Client, Stream>>,
-    Stream: Access<TcpStream>,
+    Stream: Access,
     Client,
 > TreeConnection<Session, Con, Stream, Client>
 {
@@ -115,7 +113,7 @@ impl<
 impl<
     Session: Borrow<Session202<Con, Stream, Client>>,
     Con: Borrow<Connection<Client, Stream>>,
-    Stream: Access<TcpStream>,
+    Stream: Access,
     Client,
 > Drop for TreeConnection<Session, Con, Stream, Client>
 {
@@ -123,9 +121,15 @@ impl<
         let header = SyncHeader202Outgoing::from_tree_con(self, Command202::TreeDisconnect);
         let session = self.session.borrow();
         let key = session.requires_signing().then_some(*session.session_key());
-        let mut lock = session.connection.borrow().borrow_tcp();
-        let _ = write_202_message(lock.deref_mut(), key, header, &TreeDisconnectRequest, false);
-        let Ok((_header, body)) = read_202_message(lock.deref_mut(), Validation::from(key)) else {
+        let mut lock = session.connection.borrow().inner.lock_mut();
+        let _ = write_202_message(
+            lock.stream_mut(),
+            key,
+            header,
+            &TreeDisconnectRequest,
+            false,
+        );
+        let Ok((_header, body)) = read_202_message(lock.stream_mut(), Validation::from(key)) else {
             return;
         };
         let _ = TreeDisconnectResponse::read_from(body.as_ref());

@@ -4,10 +4,7 @@ use std::{
     io::Cursor,
     net::{TcpStream, ToSocketAddrs},
     num::NonZero,
-    sync::{
-        Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Mutex,
 };
 
 use kenobi::cred::{Credentials, Outbound};
@@ -47,37 +44,44 @@ impl Client202 {
     pub fn connect(
         &self,
         addr: impl ToSocketAddrs,
-    ) -> Result<Connection<&Client202, RefCell<TcpStream>>, ConnectError> {
+    ) -> Result<Connection<&Client202, RefCell<ConnectionInner>>, ConnectError> {
         Connection::new(self, addr)
     }
 }
 
-pub type SharedConnection<Client> = Connection<Client, Mutex<TcpStream>>;
+pub type SharedConnection<Client> = Connection<Client, Mutex<ConnectionInner>>;
+
+#[derive(Debug)]
+pub struct ConnectionInner {
+    message_id: u64,
+    tcp: TcpStream,
+}
+impl ConnectionInner {
+    pub(crate) fn fetch_increment_message_id(&mut self) -> u64 {
+        let num = self.message_id;
+        self.message_id += 1;
+        num
+    }
+    pub(crate) fn stream_mut(&mut self) -> &mut TcpStream {
+        &mut self.tcp
+    }
+}
 
 #[derive(Debug)]
 pub struct Connection<Client, Stream> {
     pub(crate) client: Client,
-    message_id: AtomicU64,
-    tcp: Stream,
+    pub(crate) inner: Stream,
     max_transact_size: u32,
     max_read_size: u32,
     max_write_size: u32,
     server_requires_signing: bool,
 }
 impl<Stream, Client> Connection<Client, Stream> {
-    pub(crate) fn fetch_increment_message_id(&self) -> u64 {
-        self.message_id.fetch_add(1, Ordering::Relaxed)
-    }
     pub fn server_requires_signing(&self) -> bool {
         self.server_requires_signing
     }
 }
-impl<Client, Stream: Access<TcpStream>> Connection<Client, Stream> {
-    pub fn borrow_tcp(&self) -> Stream::Guard<'_> {
-        self.tcp.lock_mut()
-    }
-}
-impl<Stream: Access<TcpStream>, Client: Borrow<Client202>> Connection<Client, Stream> {
+impl<Stream: Access, Client: Borrow<Client202>> Connection<Client, Stream> {
     pub fn setup_session<'con>(
         &'con self,
         credentials: &Credentials<Outbound>,
@@ -129,8 +133,7 @@ impl<Stream: Access<TcpStream>, Client: Borrow<Client202>> Connection<Client, St
 
         Ok(Connection {
             client,
-            message_id: 1.into(),
-            tcp: Stream::new(tcp),
+            inner: Stream::new(ConnectionInner { message_id: 1, tcp }),
             max_transact_size: neg_resp.max_transact_size,
             max_read_size: neg_resp.max_read_size,
             max_write_size: neg_resp.max_write_size,

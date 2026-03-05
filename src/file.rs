@@ -1,9 +1,8 @@
 use std::{
     borrow::Borrow,
     io::{Cursor, Read, Seek, SeekFrom, Write},
-    net::TcpStream,
     num::NonZero,
-    ops::{BitOr, DerefMut},
+    ops::BitOr,
 };
 
 use crate::{
@@ -32,7 +31,7 @@ pub struct FileHandle<
     'tree,
     Session: Borrow<Session202<Con, Stream, Client>>,
     Con: Borrow<Connection<Client, Stream>>,
-    Stream: Access<TcpStream>,
+    Stream: Access,
     Client,
 > {
     tree_connection: &'tree TreeConnection<Session, Con, Stream, Client>,
@@ -49,7 +48,7 @@ pub struct FileHandle<
 impl<
     Session: Borrow<Session202<Con, Stream, Client>>,
     Con: Borrow<Connection<Client, Stream>>,
-    Stream: Access<TcpStream>,
+    Stream: Access,
     Client,
 > FileHandle<'_, Session, Con, Stream, Client>
 {
@@ -59,7 +58,7 @@ impl<
     ) -> Result<FileHandle<'tree, Session, Con, Stream, Client>, OpenError> {
         let header = SyncHeader202Outgoing::from_tree_con(tree_connection, Command202::Create);
         let request_body = FileCreateRequest {
-            oplock_level: Some(OplockLevel202::Batch),
+            oplock_level: None,
             impersonation_level: ImpersonationLevel::Impersonation,
             desired_access: AccessMask::READ_DATA
                 | AccessMask::READ_ATTRIBUTES
@@ -76,9 +75,9 @@ impl<
             .requires_signing()
             .then_some(session.session_key())
             .copied();
-        let mut lock = session.connection.borrow().borrow_tcp();
-        write_202_message(lock.deref_mut(), key, header, &request_body, false).unwrap();
-        let (header, body) = read_202_message(lock.deref_mut(), Validation::from(key)).unwrap();
+        let mut lock = session.connection.borrow().inner.lock_mut();
+        write_202_message(lock.stream_mut(), key, header, &request_body, false).unwrap();
+        let (header, body) = read_202_message(lock.stream_mut(), Validation::from(key)).unwrap();
         drop(lock);
         if let Some(code) = NonZero::new(header.status) {
             return Err(ServerError::handle_error_body(code, &body));
@@ -119,9 +118,9 @@ impl<
             .requires_signing()
             .then_some(session.session_key())
             .copied();
-        let mut lock = session.connection.borrow().borrow_tcp();
+        let mut lock = session.connection.borrow().inner.lock_mut();
         write_202_message(
-            lock.deref_mut(),
+            lock.stream_mut(),
             key,
             header,
             &ReadRequest {
@@ -137,7 +136,7 @@ impl<
             WriteError::MessageTooLong => ReadFileError::InvalidMessage,
         })?;
         let (header, body) =
-            read_202_message(lock.deref_mut(), Validation::from(key)).map_err(|e| match e {
+            read_202_message(lock.stream_mut(), Validation::from(key)).map_err(|e| match e {
                 MsgReadError::NetBIOS
                 | MsgReadError::NotSigned
                 | MsgReadError::InvalidSignature
@@ -161,9 +160,9 @@ impl<
             .requires_signing()
             .then_some(session.session_key())
             .copied();
-        let mut lock = session.connection.borrow().borrow_tcp();
+        let mut lock = session.connection.borrow().inner.lock_mut();
         write_202_message(
-            lock.deref_mut(),
+            lock.stream_mut(),
             session_key,
             header,
             &CloseRequest { id: self.id },
@@ -171,7 +170,7 @@ impl<
         )
         .unwrap();
         let (header, body) =
-            read_202_message(lock.deref_mut(), Validation::from(session_key)).unwrap();
+            read_202_message(lock.stream_mut(), Validation::from(session_key)).unwrap();
         drop(lock);
         if let Some(code) = NonZero::new(header.status) {
             panic!("Error with code {code}");
@@ -186,7 +185,7 @@ impl<
 impl<
     Session: Borrow<Session202<Con, Stream, Client>>,
     Con: Borrow<Connection<Client, Stream>>,
-    Stream: Access<TcpStream>,
+    Stream: Access,
     Client,
 > Drop for FileHandle<'_, Session, Con, Stream, Client>
 {
@@ -197,7 +196,7 @@ impl<
 impl<
     Session: Borrow<Session202<Con, Stream, Client>>,
     Con: Borrow<Connection<Client, Stream>>,
-    Stream: Access<TcpStream>,
+    Stream: Access,
     Client,
 > Read for FileHandle<'_, Session, Con, Stream, Client>
 {
@@ -235,7 +234,7 @@ impl<
 impl<
     Session: Borrow<Session202<Con, Stream, Client>>,
     Con: Borrow<Connection<Client, Stream>>,
-    Stream: Access<TcpStream>,
+    Stream: Access,
     Client,
 > Seek for FileHandle<'_, Session, Con, Stream, Client>
 {
