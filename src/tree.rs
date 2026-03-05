@@ -1,10 +1,13 @@
 use std::{
+    borrow::Borrow,
     io::{Cursor, Read, Seek, Write},
+    marker::PhantomData,
     num::NonZero,
 };
 
 use crate::{
     ReadLe,
+    client::{Client202, Connection},
     error::{ErrorResponse2, ServerError},
     file::{FileHandle, OpenError},
     header::{Command202, SyncHeader202Outgoing},
@@ -13,37 +16,55 @@ use crate::{
     },
     session::Session202,
     share_name::{InvalidShareName, ShareName},
+    sync::Access,
 };
 
 #[derive(Debug)]
-pub struct TreeConnection<'client, 'con, 'session> {
-    session: &'session mut Session202<'client, 'con>,
+pub struct TreeConnection<
+    Session: Borrow<Session202<Con, Stream, Client>>,
+    Con: Borrow<Connection<Client, Stream>>,
+    Stream: Access,
+    Client,
+> {
+    session: Session,
     share_type: ShareType,
     /// There are no valid flags in 202 besides the SMB2_SHARE_CAP_DFS
     dfs_capability: bool,
     id: u32,
+    _marker: PhantomData<(Con, Stream, Client)>,
 }
-impl TreeConnection<'_, '_, '_> {
-    pub fn new<'client, 'con, 'session>(
-        session: &'session mut Session202<'client, 'con>,
+impl<
+    Session: Borrow<Session202<Con, Stream, Client>>,
+    Con: Borrow<Connection<Client, Stream>>,
+    Stream: Access,
+    Client: Borrow<Client202>,
+> TreeConnection<Session, Con, Stream, Client>
+{
+    pub fn new(
+        session: Session,
         path: &str,
-    ) -> Result<TreeConnection<'client, 'con, 'session>, TreeConnectError> {
-        let tc_header = SyncHeader202Outgoing::from_session(session, Command202::TreeConnect);
+    ) -> Result<TreeConnection<Session, Con, Stream, Client>, TreeConnectError> {
+        let tc_header =
+            SyncHeader202Outgoing::from_session(session.borrow(), Command202::TreeConnect);
         let session_key = session
+            .borrow()
             .requires_signing()
-            .then_some(session.session_key())
+            .then_some(session.borrow().session_key())
             .copied();
         if let Err(e) = parse_share_path(path) {
             return Err(TreeConnectError::InvalidPath(e));
         };
+        let mut lock = session.borrow().connection.borrow().inner.lock_mut();
         write_202_message(
-            &mut session.connection.tcp,
+            lock.stream_mut(),
             session_key,
             tc_header,
             &TreeConnectRequest(path),
+            false,
         )?;
         let (header, msg) =
-            read_202_message(&mut session.connection.tcp, Validation::from(session_key)).unwrap();
+            read_202_message(lock.stream_mut(), Validation::from(session_key)).unwrap();
+        drop(lock);
         if let Some(code) = NonZero::new(header.status) {
             return Err(ServerError::handle_error_body(code, &msg));
         }
@@ -54,40 +75,61 @@ impl TreeConnection<'_, '_, '_> {
             // Ignore all other capabilities for now (since it's 202)
             dfs_capability: response.capabilities & 0x08 != 0,
             id: header.tree_id,
+            _marker: PhantomData,
         })
     }
     pub fn disconnect(self) {
         drop(self)
     }
 }
-impl<'client, 'con, 'session> TreeConnection<'client, 'con, 'session> {
-    pub(crate) fn session_mut(&mut self) -> &mut Session202<'client, 'con> {
-        self.session
+impl<
+    Session: Borrow<Session202<Con, Stream, Client>>,
+    Con: Borrow<Connection<Client, Stream>>,
+    Stream: Access,
+    Client,
+> TreeConnection<Session, Con, Stream, Client>
+{
+    pub(crate) fn session(&self) -> &Session202<Con, Stream, Client> {
+        self.session.borrow()
     }
     pub fn id(&self) -> u32 {
         self.id
     }
+}
+impl<
+    Session: Borrow<Session202<Con, Stream, Client>>,
+    Con: Borrow<Connection<Client, Stream>>,
+    Stream: Access,
+    Client,
+> TreeConnection<Session, Con, Stream, Client>
+{
     pub fn open_file<'tree>(
-        &'tree mut self,
+        &'tree self,
         path: &str,
-    ) -> Result<FileHandle<'client, 'con, 'session, 'tree>, OpenError> {
+    ) -> Result<FileHandle<'tree, Session, Con, Stream, Client>, OpenError> {
         FileHandle::new(self, path)
     }
 }
-impl Drop for TreeConnection<'_, '_, '_> {
+impl<
+    Session: Borrow<Session202<Con, Stream, Client>>,
+    Con: Borrow<Connection<Client, Stream>>,
+    Stream: Access,
+    Client,
+> Drop for TreeConnection<Session, Con, Stream, Client>
+{
     fn drop(&mut self) {
         let header = SyncHeader202Outgoing::from_tree_con(self, Command202::TreeDisconnect);
-        let session = &mut self.session;
+        let session = self.session.borrow();
         let key = session.requires_signing().then_some(*session.session_key());
+        let mut lock = session.connection.borrow().inner.lock_mut();
         let _ = write_202_message(
-            &mut session.connection.tcp,
+            lock.stream_mut(),
             key,
             header,
             &TreeDisconnectRequest,
+            false,
         );
-        let Ok((_header, body)) =
-            read_202_message(&mut session.connection.tcp, Validation::from(key))
-        else {
+        let Ok((_header, body)) = read_202_message(lock.stream_mut(), Validation::from(key)) else {
             return;
         };
         let _ = TreeDisconnectResponse::read_from(body.as_ref());

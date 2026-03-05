@@ -57,16 +57,16 @@ impl MessageBody for ReadRequest {
 #[derive(Debug)]
 pub struct ReadResponse(Box<[u8]>);
 impl ReadResponse {
-    const STRUCTURE_SIZE: u16 = 49;
+    const STRUCTURE_SIZE: u16 = 17;
     pub fn as_slice(&self) -> &[u8] {
         &self.0
     }
     pub fn into_inner(self) -> Box<[u8]> {
         self.0
     }
-    pub fn read_from<R: Read + Seek>(mut r: R) -> Result<Self, std::io::Error> {
+    pub fn read_from<R: Read + Seek>(mut r: R) -> Result<Self, ReadResponseError> {
         if r.read_u16()? != Self::STRUCTURE_SIZE {
-            panic!("Invalid structure size");
+            return Err(ReadResponseError::InvalidMessage);
         }
         let mut offset = 0;
         r.read_exact(std::slice::from_mut(&mut offset))?;
@@ -75,13 +75,23 @@ impl ReadResponse {
         let _data_remaining = r.read_u32()?;
         r.seek_relative(4)?;
         if offset < 64 + 16 {
-            panic!("Offset into data");
+            Err(ReadResponseError::InvalidMessage)
         } else {
             let mut buffer = vec![0; data_length as usize].into_boxed_slice();
             r.seek(SeekFrom::Start((offset - 64) as u64))?;
             r.read_exact(buffer.as_mut())?;
             Ok(Self(buffer))
         }
+    }
+}
+#[derive(Debug)]
+pub enum ReadResponseError {
+    Io(std::io::Error),
+    InvalidMessage,
+}
+impl From<std::io::Error> for ReadResponseError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
     }
 }
 
@@ -93,6 +103,21 @@ pub enum ReadFileError {
         code: NonZero<u32>,
         body: ErrorResponse2,
     },
+}
+impl ReadFileError {
+    pub fn collapse_to_io_error(self) -> std::io::Error {
+        match self {
+            ReadFileError::InvalidMessage => std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "server sent an invalid message",
+            ),
+            ReadFileError::Io(io) => io,
+            ReadFileError::ServerError { code, body } => {
+                dbg!(code, body);
+                std::io::Error::other("server sent a protocol error")
+            }
+        }
+    }
 }
 impl From<std::io::Error> for ReadFileError {
     fn from(value: std::io::Error) -> Self {

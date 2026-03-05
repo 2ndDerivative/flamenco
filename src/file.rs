@@ -1,18 +1,25 @@
 use std::{
-    io::{Cursor, Read, Write},
+    borrow::Borrow,
+    io::{Cursor, Read, Seek, SeekFrom, Write},
     num::NonZero,
     ops::BitOr,
 };
 
 use crate::{
     ReadLe,
+    client::Connection,
     error::{ErrorResponse2, ServerError},
     file::{
         close::{CloseRequest, CloseResponse},
-        read::{ReadFileError, ReadRequest, ReadResponse},
+        read::{ReadFileError, ReadRequest, ReadResponse, ReadResponseError},
     },
     header::{Command202, SyncHeader202Outgoing},
-    message::{MessageBody, Validation, read_202_message, write_202_message},
+    message::{
+        MessageBody, ReadError as MsgReadError, Validation, WriteError, read_202_message,
+        write_202_message,
+    },
+    session::Session202,
+    sync::Access,
     tree::TreeConnection,
 };
 
@@ -20,10 +27,17 @@ mod close;
 mod read;
 
 #[derive(Debug)]
-pub struct FileHandle<'client, 'con, 'session, 'tree> {
-    tree_connection: &'tree mut TreeConnection<'client, 'con, 'session>,
+pub struct FileHandle<
+    'tree,
+    Session: Borrow<Session202<Con, Stream, Client>>,
+    Con: Borrow<Connection<Client, Stream>>,
+    Stream: Access,
+    Client,
+> {
+    tree_connection: &'tree TreeConnection<Session, Con, Stream, Client>,
     id: FileId,
     oplock_level: Option<OplockLevel202>,
+    offset: u64,
     allocation_size: u64,
     end_of_file: u64,
     creation_time: u64,
@@ -31,33 +45,40 @@ pub struct FileHandle<'client, 'con, 'session, 'tree> {
     last_write_time: u64,
     change_time: u64,
 }
-impl FileHandle<'_, '_, '_, '_> {
-    pub(crate) fn new<'tree, 'client, 'con, 'session>(
-        tree_connection: &'tree mut TreeConnection<'client, 'con, 'session>,
+impl<
+    Session: Borrow<Session202<Con, Stream, Client>>,
+    Con: Borrow<Connection<Client, Stream>>,
+    Stream: Access,
+    Client,
+> FileHandle<'_, Session, Con, Stream, Client>
+{
+    pub(crate) fn new<'tree>(
+        tree_connection: &'tree TreeConnection<Session, Con, Stream, Client>,
         path: &str,
-    ) -> Result<FileHandle<'client, 'con, 'session, 'tree>, OpenError> {
+    ) -> Result<FileHandle<'tree, Session, Con, Stream, Client>, OpenError> {
         let header = SyncHeader202Outgoing::from_tree_con(tree_connection, Command202::Create);
         let request_body = FileCreateRequest {
-            oplock_level: Some(OplockLevel202::Batch),
+            oplock_level: None,
             impersonation_level: ImpersonationLevel::Impersonation,
             desired_access: AccessMask::READ_DATA
                 | AccessMask::READ_ATTRIBUTES
                 | AccessMask::READ_EA
                 | AccessMask::READ_CONTROL,
             file_attributes: 0x0,
-            create_options: 0x40 | 0x200 | 0x800,
+            create_options: 0x40 | 0x200,
             share_access: ShareAccess::SHARE_READ | ShareAccess::SHARE_WRITE,
             create_disposition: CreateDisposition::Open,
             path,
         };
-        let session = tree_connection.session_mut();
+        let session = tree_connection.session();
         let key = session
             .requires_signing()
             .then_some(session.session_key())
             .copied();
-        write_202_message(&mut session.connection.tcp, key, header, &request_body).unwrap();
-        let (header, body) =
-            read_202_message(&mut session.connection.tcp, Validation::from(key)).unwrap();
+        let mut lock = session.connection.borrow().inner.lock_mut();
+        write_202_message(lock.stream_mut(), key, header, &request_body, false).unwrap();
+        let (header, body) = read_202_message(lock.stream_mut(), Validation::from(key)).unwrap();
+        drop(lock);
         if let Some(code) = NonZero::new(header.status) {
             return Err(ServerError::handle_error_body(code, &body));
         }
@@ -73,8 +94,9 @@ impl FileHandle<'_, '_, '_, '_> {
             attributes,
             id,
         } = CreateResponse::read_from(body.as_ref()).unwrap();
-        Ok(dbg!(FileHandle {
+        Ok(FileHandle {
             oplock_level,
+            offset: 0,
             tree_connection,
             id,
             allocation_size,
@@ -83,71 +105,147 @@ impl FileHandle<'_, '_, '_, '_> {
             last_access_time,
             last_write_time,
             change_time,
-        }))
+        })
     }
     pub fn read_raw(
         &mut self,
-        offset: u64,
         length: u32,
         minimum_count: u32,
     ) -> Result<Box<[u8]>, ReadFileError> {
         let header = SyncHeader202Outgoing::from_tree_con(self.tree_connection, Command202::Read);
-        let session = self.tree_connection.session_mut();
+        let session = self.tree_connection.session();
         let key = session
             .requires_signing()
             .then_some(session.session_key())
             .copied();
+        let mut lock = session.connection.borrow().inner.lock_mut();
         write_202_message(
-            &mut session.connection.tcp,
+            lock.stream_mut(),
             key,
             header,
             &ReadRequest {
                 length,
-                offset,
+                offset: self.offset,
                 id: self.id,
                 minimum_count,
             },
+            true,
         )
-        .unwrap();
+        .map_err(|e| match e {
+            WriteError::Connection(io) => ReadFileError::Io(io),
+            WriteError::MessageTooLong => ReadFileError::InvalidMessage,
+        })?;
         let (header, body) =
-            read_202_message(&mut session.connection.tcp, Validation::from(key)).unwrap();
+            read_202_message(lock.stream_mut(), Validation::from(key)).map_err(|e| match e {
+                MsgReadError::NetBIOS
+                | MsgReadError::NotSigned
+                | MsgReadError::InvalidSignature
+                | MsgReadError::InvalidlySignedMessage => ReadFileError::InvalidMessage,
+                MsgReadError::Connection(io) => ReadFileError::Io(io),
+            })?;
+        drop(lock);
         if let Some(code) = NonZero::new(header.status) {
             return Err(ServerError::handle_error_body(code, &body));
         }
-        let buffer = ReadResponse::read_from(Cursor::new(body))
-            .unwrap()
-            .into_inner();
-        Ok(buffer)
+        match ReadResponse::read_from(Cursor::new(body)) {
+            Ok(ok) => Ok(ok.into_inner()),
+            Err(ReadResponseError::Io(io)) => Err(ReadFileError::Io(io)),
+            Err(ReadResponseError::InvalidMessage) => Err(ReadFileError::InvalidMessage),
+        }
     }
     fn send_close(&mut self) -> Result<(), std::io::Error> {
         let header = SyncHeader202Outgoing::from_tree_con(self.tree_connection, Command202::Close);
-        let session = self.tree_connection.session_mut();
+        let session = self.tree_connection.session();
         let session_key = session
             .requires_signing()
             .then_some(session.session_key())
             .copied();
+        let mut lock = session.connection.borrow().inner.lock_mut();
         write_202_message(
-            &mut session.connection.tcp,
+            lock.stream_mut(),
             session_key,
             header,
             &CloseRequest { id: self.id },
+            false,
         )
         .unwrap();
         let (header, body) =
-            read_202_message(&mut session.connection.tcp, Validation::from(session_key)).unwrap();
+            read_202_message(lock.stream_mut(), Validation::from(session_key)).unwrap();
+        drop(lock);
         if let Some(code) = NonZero::new(header.status) {
             panic!("Error with code {code}");
         }
-        let body = CloseResponse::read_from(body.as_ref()).unwrap();
+        let _body = CloseResponse::read_from(body.as_ref()).unwrap();
         Ok(())
     }
     pub fn close(mut self) -> Result<(), std::io::Error> {
         self.send_close()
     }
 }
-impl Drop for FileHandle<'_, '_, '_, '_> {
+impl<
+    Session: Borrow<Session202<Con, Stream, Client>>,
+    Con: Borrow<Connection<Client, Stream>>,
+    Stream: Access,
+    Client,
+> Drop for FileHandle<'_, Session, Con, Stream, Client>
+{
     fn drop(&mut self) {
         let _ = self.send_close();
+    }
+}
+impl<
+    Session: Borrow<Session202<Con, Stream, Client>>,
+    Con: Borrow<Connection<Client, Stream>>,
+    Stream: Access,
+    Client,
+> Read for FileHandle<'_, Session, Con, Stream, Client>
+{
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let until_end = (self.end_of_file - self.offset)
+            .try_into()
+            .unwrap_or(u32::MAX);
+        let len = buf.len().try_into().unwrap_or(u32::MAX).min(until_end);
+        match self.read_raw(len, 0) {
+            Ok(outbuf) => {
+                assert!(outbuf.len() <= len as usize);
+                self.offset += outbuf.len() as u64;
+                buf[0..outbuf.len()].copy_from_slice(&outbuf);
+                Ok(outbuf.len())
+            }
+            Err(rd) => Err(rd.collapse_to_io_error()),
+        }
+    }
+    fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+        let until_end = (self.end_of_file - self.offset)
+            .try_into()
+            .unwrap_or(u32::MAX);
+        let len = buf.len().try_into().unwrap_or(u32::MAX).min(until_end);
+        match self.read_raw(len, len) {
+            Ok(outbuf) => {
+                assert!(outbuf.len() <= len as usize);
+                self.offset += outbuf.len() as u64;
+                buf[0..outbuf.len()].copy_from_slice(&outbuf);
+                Ok(())
+            }
+            Err(rf) => Err(rf.collapse_to_io_error()),
+        }
+    }
+}
+impl<
+    Session: Borrow<Session202<Con, Stream, Client>>,
+    Con: Borrow<Connection<Client, Stream>>,
+    Stream: Access,
+    Client,
+> Seek for FileHandle<'_, Session, Con, Stream, Client>
+{
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        let new = match pos {
+            SeekFrom::Start(s) => s,
+            SeekFrom::Current(c) => self.offset.saturating_add_signed(c),
+            SeekFrom::End(c) => self.end_of_file.saturating_add_signed(c),
+        };
+        self.offset = new;
+        Ok(new)
     }
 }
 

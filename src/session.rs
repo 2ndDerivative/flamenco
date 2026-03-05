@@ -1,6 +1,8 @@
 use std::{
+    borrow::Borrow,
     fmt::Debug,
     io::{Cursor, ErrorKind, Read, Seek, SeekFrom, Write},
+    marker::PhantomData,
     num::NonZero,
 };
 
@@ -11,7 +13,7 @@ use kenobi::{
 
 use crate::{
     ReadLe,
-    client::{Connection, GuestPolicy},
+    client::{Client202, Connection, GuestPolicy},
     error::{ErrorResponse2, ServerError},
     header::{Command202, SyncHeader202Outgoing},
     message::{
@@ -19,18 +21,23 @@ use crate::{
         read_202_message, write_202_message,
     },
     sign::SecurityMode,
+    sync::Access,
     tree::{TreeConnectError, TreeConnection},
 };
 
 const ERROR_MORE_PROCESSING_REQUIRED: u32 = 0xC0000016;
 
-pub struct Session202<'client, 'con> {
+pub struct Session202<ConAccess: Borrow<Connection<Client, Stream>>, Stream: Access, Client> {
     session_key: [u8; 16],
     pub(crate) id: u64,
-    pub(crate) connection: &'con mut Connection<'client>,
+    pub(crate) connection: ConAccess,
     flags: SessionFlags,
+    requires_signing: bool,
+    _marker: PhantomData<(Stream, Client)>,
 }
-impl Debug for Session202<'_, '_> {
+impl<Con: Borrow<Connection<Client, Stream>> + Debug, Stream: Access, Client> Debug
+    for Session202<Con, Stream, Client>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Session202")
             .field("session_key", &"REDACTED")
@@ -40,20 +47,27 @@ impl Debug for Session202<'_, '_> {
             .finish()
     }
 }
-impl Session202<'_, '_> {
+impl<Con: Borrow<Connection<Client, Stream>>, Stream: Access, Client>
+    Session202<Con, Stream, Client>
+{
     pub fn requires_signing(&self) -> bool {
-        let con = &self.connection;
-        match self.flags {
-            SessionFlags::None => con.server_requires_signing() || con.client.requires_signing,
-            SessionFlags::Guest => con.client.requires_signing,
-            SessionFlags::Anonymous => false,
-        }
+        self.requires_signing
     }
-    pub(crate) fn new<'client, 'con>(
-        connection: &'con mut Connection<'client>,
+    pub(crate) fn session_key(&self) -> &[u8; 16] {
+        &self.session_key
+    }
+    pub fn close(self) {
+        drop(self);
+    }
+}
+impl<Con: Borrow<Connection<Client, Stream>>, Stream: Access, Client: Borrow<Client202>>
+    Session202<Con, Stream, Client>
+{
+    pub fn new(
+        connection: Con,
         cred: &Credentials<Outbound>,
         target_spn: Option<&str>,
-    ) -> Result<Session202<'client, 'con>, SessionSetupError> {
+    ) -> Result<Session202<Con, Stream, Client>, SessionSetupError> {
         let mut auth_context = match ClientBuilder::new_from_credentials(cred, target_spn)
             .request_delegation()
             .initialize()
@@ -63,7 +77,9 @@ impl Session202<'_, '_> {
         };
         let mut session_id = 0;
         loop {
-            let message_id = connection.fetch_increment_message_id();
+            let client = connection.borrow().client.borrow();
+            let mut connection_lock = connection.borrow().inner.lock_mut();
+            let message_id = connection_lock.fetch_increment_message_id();
             let header = SyncHeader202Outgoing {
                 command: Command202::SessionSetup,
                 credits: 256,
@@ -74,7 +90,7 @@ impl Session202<'_, '_> {
                 session_id,
             };
             let body = SessionSetupRequest {
-                security_mode: if connection.client.requires_signing {
+                security_mode: if client.requires_signing {
                     SecurityMode::SigningRequired
                 } else {
                     SecurityMode::SigningEnabled
@@ -83,8 +99,9 @@ impl Session202<'_, '_> {
                 previous_session_id: 0,
                 buffer: auth_context.next_token(),
             };
-            write_202_message(&mut connection.tcp, None, header, &body)?;
-            let message_buffer = buffer_for_delayed_validation(&mut connection.tcp)?;
+            write_202_message(connection_lock.stream_mut(), None, header, &body, false)?;
+            let message_buffer = buffer_for_delayed_validation(connection_lock.stream_mut())?;
+            drop(connection_lock);
             let (header, body) = read_202_message(&mut message_buffer.as_ref(), Validation::Skip)?;
             // Lookup session ID
             if let Some(code) = NonZero::new(header.status)
@@ -104,58 +121,68 @@ impl Session202<'_, '_> {
                         .ok_or(SessionSetupError::SessionKeyTooShort)?;
                     let (_, _) = read_202_message(&*message_buffer, Validation::Key(session_key))?;
                     if flags == SessionFlags::Guest {
-                        match connection.client.guest_policy {
+                        match client.guest_policy {
                             GuestPolicy::Disallowed => {
                                 return Err(SessionSetupError::DisallowedGuestAccess);
                             }
-                            GuestPolicy::AllowedInsecurely
-                                if connection.client.requires_signing =>
-                            {
+                            GuestPolicy::AllowedInsecurely if client.requires_signing => {
                                 return Err(SessionSetupError::DisallowedGuestAccess);
                             }
                             _ => {}
                         }
                     }
+                    let requires_signing = match flags {
+                        SessionFlags::None => {
+                            connection.borrow().server_requires_signing()
+                                || client.borrow().requires_signing
+                        }
+                        SessionFlags::Guest => client.requires_signing,
+                        SessionFlags::Anonymous => false,
+                    };
                     return Ok(Session202 {
                         flags,
+                        requires_signing,
                         id: header.session_id,
                         session_key,
                         connection,
+                        _marker: PhantomData,
                     });
                 }
             };
             session_id = header.session_id;
         }
     }
-    pub(crate) fn session_key(&self) -> &[u8; 16] {
-        &self.session_key
-    }
-    pub fn close(self) {
-        drop(self);
-    }
 }
-impl<'client, 'con> Session202<'client, 'con> {
+impl<Con: Borrow<Connection<Client, Stream>>, Stream: Access, Client: Borrow<Client202>>
+    Session202<Con, Stream, Client>
+{
     pub fn tree_connect<'session>(
         &'session mut self,
         share_path: &str,
-    ) -> Result<TreeConnection<'client, 'con, 'session>, TreeConnectError> {
+    ) -> Result<
+        TreeConnection<&'session Session202<Con, Stream, Client>, Con, Stream, Client>,
+        TreeConnectError,
+    > {
         TreeConnection::new(self, share_path)
     }
 }
-impl Drop for Session202<'_, '_> {
+impl<Con: Borrow<Connection<Client, Stream>>, Stream: Access, Client> Drop
+    for Session202<Con, Stream, Client>
+{
     fn drop(&mut self) {
+        let mut lock = self.connection.borrow().inner.lock_mut();
         let logoff_header = SyncHeader202Outgoing {
             command: Command202::Logoff,
             credits: 0,
             flags: 0,
             next_command: None,
-            message_id: self.connection.fetch_increment_message_id(),
+            message_id: lock.fetch_increment_message_id(),
             tree_id: 0,
             session_id: self.id,
         };
         let key = self.requires_signing().then_some(self.session_key);
-        let _ = write_202_message(&mut self.connection.tcp, key, logoff_header, &LogoffRequest);
-        let _ = read_202_message(&mut self.connection.tcp, Validation::Key(self.session_key));
+        let _ = write_202_message(lock.stream_mut(), key, logoff_header, &LogoffRequest, false);
+        let _ = read_202_message(lock.stream_mut(), Validation::Key(self.session_key));
     }
 }
 

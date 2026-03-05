@@ -1,7 +1,10 @@
 use std::{
+    borrow::Borrow,
+    cell::RefCell,
     io::Cursor,
     net::{TcpStream, ToSocketAddrs},
     num::NonZero,
+    sync::Mutex,
 };
 
 use kenobi::cred::{Credentials, Outbound};
@@ -13,6 +16,7 @@ use crate::{
     negotiate::{Dialect, NegotiateError, NegotiateRequest202, NegotiateResponse},
     session::{Session202, SessionSetupError},
     sign::SecurityMode,
+    sync::Access,
 };
 
 const MINIMUM_TRANSACT_SIZE: u32 = 65536;
@@ -37,7 +41,59 @@ impl Client202 {
             ..Default::default()
         }
     }
-    pub fn connect(&self, addr: impl ToSocketAddrs) -> Result<Connection<'_>, ConnectError> {
+    pub fn connect(
+        &self,
+        addr: impl ToSocketAddrs,
+    ) -> Result<Connection<&Client202, RefCell<ConnectionInner>>, ConnectError> {
+        Connection::new(self, addr)
+    }
+}
+
+pub type SharedConnection<Client> = Connection<Client, Mutex<ConnectionInner>>;
+
+#[derive(Debug)]
+pub struct ConnectionInner {
+    message_id: u64,
+    tcp: TcpStream,
+}
+impl ConnectionInner {
+    pub(crate) fn fetch_increment_message_id(&mut self) -> u64 {
+        let num = self.message_id;
+        self.message_id += 1;
+        num
+    }
+    pub(crate) fn stream_mut(&mut self) -> &mut TcpStream {
+        &mut self.tcp
+    }
+}
+
+#[derive(Debug)]
+pub struct Connection<Client, Stream> {
+    pub(crate) client: Client,
+    pub(crate) inner: Stream,
+    max_transact_size: u32,
+    max_read_size: u32,
+    max_write_size: u32,
+    server_requires_signing: bool,
+}
+impl<Stream, Client> Connection<Client, Stream> {
+    pub fn server_requires_signing(&self) -> bool {
+        self.server_requires_signing
+    }
+}
+impl<Stream: Access, Client: Borrow<Client202>> Connection<Client, Stream> {
+    pub fn setup_session<'con>(
+        &'con self,
+        credentials: &Credentials<Outbound>,
+        target_spn: Option<&str>,
+    ) -> Result<Session202<&'con Connection<Client, Stream>, Stream, Client>, SessionSetupError>
+    {
+        Session202::new(self, credentials, target_spn)
+    }
+    pub fn new(
+        client: Client,
+        addr: impl ToSocketAddrs,
+    ) -> Result<Connection<Client, Stream>, ConnectError> {
         let mut tcp = TcpStream::connect(addr)?;
         let neg_header = SyncHeader202Outgoing {
             command: Command202::Negotiate,
@@ -52,7 +108,7 @@ impl Client202 {
             capabilities: 0,
             security_mode: SecurityMode::None,
         };
-        write_202_message(&mut tcp, None, neg_header, &neg_req)?;
+        write_202_message(&mut tcp, None, neg_header, &neg_req, false)?;
 
         let (header, body) = read_202_message(&mut tcp, Validation::ExpectNone)?;
         if let Some(code) = NonZero::new(header.status) {
@@ -76,44 +132,13 @@ impl Client202 {
         }
 
         Ok(Connection {
-            client: self,
-            message_id: 1,
-            tcp,
+            client,
+            inner: Stream::new(ConnectionInner { message_id: 1, tcp }),
             max_transact_size: neg_resp.max_transact_size,
             max_read_size: neg_resp.max_read_size,
             max_write_size: neg_resp.max_write_size,
             server_requires_signing,
         })
-    }
-}
-
-#[derive(Debug)]
-pub struct Connection<'client> {
-    pub(crate) client: &'client Client202,
-    message_id: u64,
-    pub(crate) tcp: TcpStream,
-    max_transact_size: u32,
-    max_read_size: u32,
-    max_write_size: u32,
-    server_requires_signing: bool,
-}
-impl Connection<'_> {
-    pub fn fetch_increment_message_id(&mut self) -> u64 {
-        let num = self.message_id;
-        self.message_id += 1;
-        num
-    }
-    pub fn server_requires_signing(&self) -> bool {
-        self.server_requires_signing
-    }
-}
-impl<'client> Connection<'client> {
-    pub fn setup_session<'con>(
-        &'con mut self,
-        credentials: &Credentials<Outbound>,
-        target_spn: Option<&str>,
-    ) -> Result<Session202<'client, 'con>, SessionSetupError> {
-        Session202::new(self, credentials, target_spn)
     }
 }
 

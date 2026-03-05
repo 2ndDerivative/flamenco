@@ -6,10 +6,11 @@ pub mod file;
 mod header;
 mod message;
 mod negotiate;
-mod session;
+pub mod session;
 mod share_name;
 mod sign;
-mod tree;
+pub mod sync;
+pub mod tree;
 
 trait ReadLe: Read {
     fn read_u16(&mut self) -> std::io::Result<u16> {
