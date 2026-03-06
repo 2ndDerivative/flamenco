@@ -99,7 +99,7 @@ impl Connection {
         let mut tcp = TcpStream::connect(addr)?;
         let neg_header = SyncHeader202Outgoing {
             command: Command202::Negotiate,
-            credits: 0,
+            credits: 1,
             flags: 0,
             next_command: None,
             message_id: 0,
