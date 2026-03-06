@@ -32,9 +32,9 @@ pub struct Client202 {
     pub guest_policy: GuestPolicy,
 }
 impl Client202 {
-    pub fn new(require_signing: bool) -> Arc<Self> {
+    pub fn new(requires_signing: bool) -> Arc<Self> {
         Self {
-            requires_signing: require_signing,
+            requires_signing,
             ..Default::default()
         }
         .into()
