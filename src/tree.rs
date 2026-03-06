@@ -11,7 +11,8 @@ use crate::{
     file::{FileHandle, OpenError},
     header::{Command202, SyncHeader202Outgoing},
     message::{
-        MessageBody, Validation, WriteError as MsgWriteError, read_202_message, write_202_message,
+        MessageBody, ReadError as MsgReadError, Validation, WriteError as MsgWriteError,
+        read_202_message, write_202_message,
     },
     session::Session202,
     share_name::{InvalidShareName, ShareName},
@@ -30,7 +31,11 @@ impl TreeConnection {
         session: Arc<Session202>,
         path: &str,
     ) -> Result<Arc<TreeConnection>, TreeConnectError> {
-        let tc_header = SyncHeader202Outgoing::from_session(&session, Command202::TreeConnect);
+        let Some(tc_header) =
+            SyncHeader202Outgoing::from_session(&session, Command202::TreeConnect)
+        else {
+            return Err(TreeConnectError::OutOfCredits);
+        };
         let session_key = session
             .requires_signing()
             .then_some(session.session_key())
@@ -46,8 +51,8 @@ impl TreeConnection {
             &TreeConnectRequest(path),
             false,
         )?;
-        let (header, msg) =
-            read_202_message(lock.stream_mut(), Validation::from(session_key)).unwrap();
+        let (header, msg) = read_202_message(lock.stream_mut(), Validation::from(session_key))?;
+        lock.add_credits(header.credits);
         drop(lock);
         if let Some(code) = NonZero::new(header.status) {
             return Err(ServerError::handle_error_body(code, &msg));
@@ -77,7 +82,10 @@ impl TreeConnection {
 }
 impl Drop for TreeConnection {
     fn drop(&mut self) {
-        let header = SyncHeader202Outgoing::from_tree_con(self, Command202::TreeDisconnect);
+        let Some(header) = SyncHeader202Outgoing::from_tree_con(self, Command202::TreeDisconnect)
+        else {
+            return;
+        };
         let session = &self.session;
         let key = session.requires_signing().then_some(*session.session_key());
         let mut lock = session.connection.inner.lock().unwrap();
@@ -88,9 +96,10 @@ impl Drop for TreeConnection {
             &TreeDisconnectRequest,
             false,
         );
-        let Ok((_header, body)) = read_202_message(lock.stream_mut(), Validation::from(key)) else {
+        let Ok((header, body)) = read_202_message(lock.stream_mut(), Validation::from(key)) else {
             return;
         };
+        lock.add_credits(header.credits);
         let _ = TreeDisconnectResponse::read_from(body.as_ref());
     }
 }
@@ -100,6 +109,7 @@ pub enum TreeConnectError {
     Io(std::io::Error),
     InvalidPath(InvalidSharePath),
     InvalidMessage,
+    OutOfCredits,
     Server {
         code: NonZero<u32>,
         body: ErrorResponse2,
@@ -111,6 +121,17 @@ impl ServerError for TreeConnectError {
     }
     fn parsed(code: NonZero<u32>, body: ErrorResponse2) -> Self {
         Self::Server { code, body }
+    }
+}
+impl From<MsgReadError> for TreeConnectError {
+    fn from(value: MsgReadError) -> Self {
+        match value {
+            MsgReadError::NetBIOS
+            | MsgReadError::NotSigned
+            | MsgReadError::InvalidSignature
+            | MsgReadError::InvalidlySignedMessage => TreeConnectError::InvalidMessage,
+            MsgReadError::Connection(io) => TreeConnectError::Io(io),
+        }
     }
 }
 impl From<MsgWriteError> for TreeConnectError {
