@@ -104,10 +104,6 @@ impl FileHandle {
         length: u32,
         minimum_count: u32,
     ) -> Result<Box<[u8]>, ReadFileError> {
-        println!(
-            "read_raw called with offset={}, remaining={}",
-            self.offset, length
-        );
         let header = SyncHeader202Outgoing::from_tree_con(&self.tree_connection, Command202::Read);
         let session = self.tree_connection.session();
         let key = session
@@ -118,7 +114,7 @@ impl FileHandle {
         write_202_message(
             lock.stream_mut(),
             key,
-            dbg!(header),
+            header,
             &ReadRequest {
                 length,
                 offset: self.offset,
