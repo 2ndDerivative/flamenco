@@ -1,6 +1,6 @@
 use std::{
     fmt::Debug,
-    io::{Cursor, ErrorKind, Read, Seek, SeekFrom, Write},
+    io::{Cursor, ErrorKind, SeekFrom},
     num::NonZero,
     sync::Arc,
 };
@@ -9,9 +9,9 @@ use kenobi::{
     client::{ClientBuilder, StepOut},
     cred::{Credentials, Outbound},
 };
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::{
-    ReadLe,
     client::{Connection, GuestPolicy},
     error::{ErrorResponse2, ServerError},
     header::{Command202, SyncHeader202Outgoing},
@@ -52,7 +52,7 @@ impl Session202 {
     pub fn close(self) {
         drop(self);
     }
-    pub fn new(
+    pub async fn new(
         connection: Arc<Connection>,
         cred: &Credentials<Outbound>,
         target_spn: Option<&str>,
@@ -67,8 +67,8 @@ impl Session202 {
         let mut session_id = 0;
         loop {
             let client = &connection.client;
-            let mut connection_lock = connection.inner.lock().unwrap();
-            let message_id = connection_lock.fetch_increment_message_id();
+            let mut connection_lock = connection.inner.lock().await;
+            let message_id = connection.fetch_increment_message_id();
             let header = SyncHeader202Outgoing {
                 command: Command202::SessionSetup,
                 credits: 1,
@@ -88,10 +88,12 @@ impl Session202 {
                 previous_session_id: 0,
                 buffer: auth_context.next_token(),
             };
-            write_202_message(connection_lock.stream_mut(), None, header, &body, false)?;
-            let message_buffer = buffer_for_delayed_validation(connection_lock.stream_mut())?;
+            write_202_message(connection_lock.stream_mut(), None, header, &body, false).await?;
+            let message_buffer =
+                buffer_for_delayed_validation(connection_lock.stream_mut()).await?;
             drop(connection_lock);
-            let (header, body) = read_202_message(&mut message_buffer.as_ref(), Validation::Skip)?;
+            let (header, body) =
+                read_202_message(&mut message_buffer.as_ref(), Validation::Skip).await?;
             // Lookup session ID
             if let Some(code) = NonZero::new(header.status)
                 && code.get() != ERROR_MORE_PROCESSING_REQUIRED
@@ -99,7 +101,7 @@ impl Session202 {
                 return Err(SessionSetupError::handle_error_body(code, &body));
             }
             let SessionSetupResponse { flags, sec_buffer } =
-                SessionSetupResponse::read_from(Cursor::new(body))?;
+                SessionSetupResponse::read_from(Cursor::new(body)).await?;
 
             auth_context = match auth_context.step(&sec_buffer) {
                 StepOut::Pending(p) => p,
@@ -108,7 +110,9 @@ impl Session202 {
                         .session_key()
                         .first_chunk::<16>()
                         .ok_or(SessionSetupError::SessionKeyTooShort)?;
-                    let (_, _) = read_202_message(&*message_buffer, Validation::Key(session_key))?;
+                    let (_, _) =
+                        read_202_message(&mut &*message_buffer, Validation::Key(session_key))
+                            .await?;
                     if flags == SessionFlags::Guest {
                         match client.guest_policy {
                             GuestPolicy::Disallowed => {
@@ -140,34 +144,45 @@ impl Session202 {
             session_id = header.session_id;
         }
     }
-    pub fn tree_connect(
+    pub async fn tree_connect(
         self: Arc<Self>,
         share_path: &str,
     ) -> Result<Arc<TreeConnection>, TreeConnectError> {
-        TreeConnection::new(self, share_path)
+        TreeConnection::new(self, share_path).await
     }
 }
 impl Drop for Session202 {
     fn drop(&mut self) {
-        let mut lock = self.connection.inner.lock().unwrap();
-        let logoff_header = SyncHeader202Outgoing {
-            command: Command202::Logoff,
-            credits: 1,
-            flags: 0,
-            next_command: None,
-            message_id: lock.fetch_increment_message_id(),
-            tree_id: 0,
-            session_id: self.id,
-        };
-        let key = self.requires_signing().then_some(self.session_key);
-        let _ = write_202_message(lock.stream_mut(), key, logoff_header, &LogoffRequest, false);
-        let _ = read_202_message(lock.stream_mut(), Validation::Key(self.session_key));
+        let message_id = self.connection.fetch_increment_message_id();
+        let connection = self.connection.clone();
+        let session_id = self.id;
+        let requires_signing = self.requires_signing();
+        let session_key = self.session_key;
+        tokio::spawn(async move {
+            let mut lock = connection.inner.lock().await;
+            let logoff_header = SyncHeader202Outgoing {
+                command: Command202::Logoff,
+                credits: 1,
+                flags: 0,
+                next_command: None,
+                message_id,
+                tree_id: 0,
+                session_id,
+            };
+            let key = requires_signing.then_some(session_key);
+            let _ = write_202_message(lock.stream_mut(), key, logoff_header, &LogoffRequest, false)
+                .await;
+            let _ = read_202_message(lock.stream_mut(), Validation::Key(session_key)).await;
+        });
     }
 }
 
-fn buffer_for_delayed_validation<R: Read>(mut r: R) -> Result<Box<[u8]>, MsgReadError> {
+async fn buffer_for_delayed_validation<R: AsyncReadExt + Unpin>(
+    r: &mut R,
+) -> Result<Box<[u8]>, MsgReadError> {
     let mut bios_size = [0u8; 4];
     r.read_exact(&mut bios_size)
+        .await
         .map_err(MsgReadError::Connection)?;
     let message_size = match u32::from_be_bytes(bios_size) {
         0..64 => {
@@ -185,7 +200,7 @@ fn buffer_for_delayed_validation<R: Read>(mut r: R) -> Result<Box<[u8]>, MsgRead
         .split_first_chunk_mut::<4>()
         .unwrap();
     bios.copy_from_slice(&bios_size);
-    r.read_exact(body).map_err(MsgReadError::Connection)?;
+    r.read_exact(body).await.map_err(MsgReadError::Connection)?;
     Ok(message_body_with_netbios)
 }
 
@@ -250,32 +265,32 @@ struct SessionSetupRequest<'buf> {
     pub buffer: &'buf [u8],
 }
 impl SessionSetupRequest<'_> {
-    fn write_into<W: Write>(&self, mut w: W) -> Result<(), WriteError> {
-        w.write_all(&25u16.to_le_bytes())?;
+    async fn write_into<W: AsyncWriteExt + Unpin>(&self, w: &mut W) -> Result<(), WriteError> {
+        w.write_all(&25u16.to_le_bytes()).await?;
         // flags
-        w.write_all(&[0])?;
+        w.write_all(&[0]).await?;
         // security mode
-        w.write_all(&[self.security_mode.to_value()])?;
-        w.write_all(&self.capabilities.to_le_bytes())?;
+        w.write_all(&[self.security_mode.to_value()]).await?;
+        w.write_all(&self.capabilities.to_le_bytes()).await?;
         // channel
-        w.write_all(&0u32.to_le_bytes())?;
+        w.write_all(&0u32.to_le_bytes()).await?;
 
         let secbuf_offset: u16 = 64 + 24;
-        w.write_all(&secbuf_offset.to_le_bytes())?;
+        w.write_all(&secbuf_offset.to_le_bytes()).await?;
         let Ok(secbuf_len): Result<u16, _> = self.buffer.len().try_into() else {
             return Err(WriteError::BufferTooLong);
         };
-        w.write_all(&secbuf_len.to_le_bytes())?;
+        w.write_all(&secbuf_len.to_le_bytes()).await?;
 
-        w.write_all(&self.previous_session_id.to_le_bytes())?;
-        w.write_all(self.buffer)?;
+        w.write_all(&self.previous_session_id.to_le_bytes()).await?;
+        w.write_all(self.buffer).await?;
         Ok(())
     }
 }
 impl MessageBody for SessionSetupRequest<'_> {
     type Err = WriteError;
-    fn write_to<W: Write>(&self, w: W) -> Result<(), Self::Err> {
-        SessionSetupRequest::write_into(self, w)
+    async fn write_to<W: AsyncWriteExt + Unpin>(&self, w: &mut W) -> Result<(), Self::Err> {
+        SessionSetupRequest::write_into(self, w).await
     }
     fn size_hint(&self) -> usize {
         24 + self.buffer.len()
@@ -301,21 +316,23 @@ struct SessionSetupResponse {
 }
 impl SessionSetupResponse {
     const STRUCTURE_SIZE: u16 = 9;
-    fn read_from<R: Read + Seek>(mut r: R) -> Result<Self, ReadError> {
-        if r.read_u16()? != Self::STRUCTURE_SIZE {
+    async fn read_from<R: AsyncReadExt + AsyncSeekExt + Unpin>(
+        mut r: R,
+    ) -> Result<Self, ReadError> {
+        if r.read_u16_le().await? != Self::STRUCTURE_SIZE {
             return Err(ReadError::InvalidSize);
         }
-        let flags = match r.read_u16()? {
+        let flags = match r.read_u16_le().await? {
             0x00 => SessionFlags::None,
             0x01 => SessionFlags::Guest,
             0x02 => SessionFlags::Anonymous,
             _ => return Err(ReadError::InvalidFlags),
         };
-        let secbuf_offset = r.read_u16()?;
-        let secbuf_length = r.read_u16()?;
-        r.seek(SeekFrom::Start((secbuf_offset - 64) as u64))?;
+        let secbuf_offset = r.read_u16_le().await?;
+        let secbuf_length = r.read_u16_le().await?;
+        r.seek(SeekFrom::Start((secbuf_offset - 64) as u64)).await?;
         let mut sec_buffer = vec![0; secbuf_length as usize].into_boxed_slice();
-        r.read_exact(&mut sec_buffer)?;
+        r.read_exact(&mut sec_buffer).await?;
         Ok(Self { flags, sec_buffer })
     }
 }
@@ -343,9 +360,9 @@ enum SessionFlags {
 struct LogoffRequest;
 impl MessageBody for LogoffRequest {
     type Err = std::io::Error;
-    fn write_to<W: Write>(&self, mut w: W) -> Result<(), Self::Err> {
-        w.write_all(&4u32.to_le_bytes())?;
-        w.write_all(&0u32.to_le_bytes())?;
+    async fn write_to<W: AsyncWriteExt + Unpin>(&self, w: &mut W) -> Result<(), Self::Err> {
+        w.write_all(&4u32.to_le_bytes()).await?;
+        w.write_all(&0u32.to_le_bytes()).await?;
         Ok(())
     }
     fn size_hint(&self) -> usize {

@@ -7,6 +7,7 @@ const PROTOCOL_ID: [u8; 4] = [0xFE, b'S', b'M', b'B'];
 pub(crate) const FLAG_SIGNED: u32 = 0x08;
 
 /// No status and signature, since they're not supported on the sender anyway
+#[derive(Debug)]
 pub struct SyncHeader202Outgoing {
     pub command: Command202,
     pub credits: u16,
@@ -18,12 +19,7 @@ pub struct SyncHeader202Outgoing {
 }
 impl SyncHeader202Outgoing {
     pub fn from_session(session: &Session202, command: Command202) -> Self {
-        let message_id = session
-            .connection
-            .inner
-            .lock()
-            .unwrap()
-            .fetch_increment_message_id();
+        let message_id = session.connection.fetch_increment_message_id();
         Self {
             command,
             credits: 1,

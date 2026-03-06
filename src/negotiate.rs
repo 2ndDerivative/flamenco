@@ -1,7 +1,8 @@
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
-use crate::{ReadLe, message::MessageBody, sign::SecurityMode};
-use std::io::{Read, Seek, SeekFrom, Write};
+use crate::{message::MessageBody, sign::SecurityMode};
+use std::io::SeekFrom;
 
 /// Negotiate request in SMB2020 must set client ID to 0
 #[derive(Debug)]
@@ -10,29 +11,30 @@ pub struct NegotiateRequest202 {
     pub capabilities: u32,
 }
 impl NegotiateRequest202 {
-    fn write_into<W: Write>(&self, mut w: W) -> Result<(), WriteError> {
+    async fn write_into<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<(), WriteError> {
         // structure size
-        w.write_all(&36u16.to_le_bytes())?;
+        w.write_all(&36u16.to_le_bytes()).await?;
         // dialect count
-        w.write_all(&1u16.to_le_bytes())?;
+        w.write_all(&1u16.to_le_bytes()).await?;
         // Empty security mode
-        w.write_all(&(self.security_mode as u16).to_le_bytes())?;
+        w.write_all(&(self.security_mode as u16).to_le_bytes())
+            .await?;
         // Reserved
-        w.write_all(&0u16.to_le_bytes())?;
-        w.write_all(&self.capabilities.to_le_bytes())?;
-        w.write_all(&[0u8; 16])?;
+        w.write_all(&0u16.to_le_bytes()).await?;
+        w.write_all(&self.capabilities.to_le_bytes()).await?;
+        w.write_all(&[0u8; 16]).await?;
         // client start time
-        w.write_all(&0u64.to_le_bytes())?;
+        w.write_all(&0u64.to_le_bytes()).await?;
         // dialect 202
-        w.write_all(&0x0202u16.to_le_bytes())?;
+        w.write_all(&0x0202u16.to_le_bytes()).await?;
         Ok(())
     }
 }
 
 impl MessageBody for NegotiateRequest202 {
     type Err = WriteError;
-    fn write_to<W: Write>(&self, w: W) -> Result<(), Self::Err> {
-        self.write_into(w)
+    async fn write_to<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<(), Self::Err> {
+        self.write_into(w).await
     }
     fn size_hint(&self) -> usize {
         38
@@ -64,29 +66,32 @@ pub struct NegotiateResponse {
 }
 impl NegotiateResponse {
     const STRUCTURE_SIZE: u16 = 65;
-    pub fn read_from<R: Read + Seek>(mut r: R) -> Result<Self, NegotiateError> {
-        if r.read_u16()? != Self::STRUCTURE_SIZE {
+    pub async fn read_from<R: AsyncReadExt + AsyncSeekExt + Unpin>(
+        r: &mut R,
+    ) -> Result<Self, NegotiateError> {
+        if r.read_u16_le().await? != Self::STRUCTURE_SIZE {
             return Err(NegotiateError::InvalidSize);
         }
-        let security_mode = SecurityMode::from_value(r.read_u16()?);
-        let dialect = Dialect::from_value(r.read_u16()?).ok_or(NegotiateError::InvalidDialect)?;
+        let security_mode = SecurityMode::from_value(r.read_u16_le().await?);
+        let dialect =
+            Dialect::from_value(r.read_u16_le().await?).ok_or(NegotiateError::InvalidDialect)?;
         // skip reserved
-        r.seek_relative(2)?;
+        r.seek(SeekFrom::Current(2)).await?;
         let mut server_guid = [0u8; 16];
-        r.read_exact(&mut server_guid)?;
+        r.read_exact(&mut server_guid).await?;
         let server_guid = Uuid::from_bytes(server_guid);
-        let capabilities = r.read_u32()?;
-        let max_transact_size = r.read_u32()?;
-        let max_read_size = r.read_u32()?;
-        let max_write_size = r.read_u32()?;
-        let system_time = r.read_u64()?;
-        let server_start_time = r.read_u64()?;
-        let secbuf_offset = r.read_u16()?;
-        let secbuf_length = r.read_u16()?;
+        let capabilities = r.read_u32_le().await?;
+        let max_transact_size = r.read_u32_le().await?;
+        let max_read_size = r.read_u32_le().await?;
+        let max_write_size = r.read_u32_le().await?;
+        let system_time = r.read_u64_le().await?;
+        let server_start_time = r.read_u64_le().await?;
+        let secbuf_offset = r.read_u16_le().await?;
+        let secbuf_length = r.read_u16_le().await?;
         // ignore reserved and padding
-        r.seek(SeekFrom::Start((secbuf_offset - 64) as u64))?;
+        r.seek(SeekFrom::Start((secbuf_offset - 64) as u64)).await?;
         let mut sec_buffer = vec![0; secbuf_length as usize].into_boxed_slice();
-        r.read_exact(&mut sec_buffer)?;
+        r.read_exact(&mut sec_buffer).await?;
 
         Ok(Self {
             security_mode,

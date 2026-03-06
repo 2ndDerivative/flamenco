@@ -1,12 +1,15 @@
 use std::{
-    io::{Cursor, Read, Seek, SeekFrom, Write},
+    io::{Cursor, SeekFrom},
     num::NonZero,
     ops::BitOr,
+    pin::Pin,
     sync::Arc,
+    task::{Context, Poll},
 };
 
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite, AsyncWriteExt, ReadBuf};
+
 use crate::{
-    ReadLe,
     error::{ErrorResponse2, ServerError},
     file::{
         close::{CloseRequest, CloseResponse},
@@ -37,7 +40,7 @@ pub struct FileHandle {
     change_time: u64,
 }
 impl FileHandle {
-    pub(crate) fn new(
+    pub(crate) async fn new(
         tree_connection: Arc<TreeConnection>,
         path: &str,
     ) -> Result<FileHandle, OpenError> {
@@ -60,9 +63,13 @@ impl FileHandle {
             .requires_signing()
             .then_some(session.session_key())
             .copied();
-        let mut lock = session.connection.inner.lock().unwrap();
-        write_202_message(lock.stream_mut(), key, header, &request_body, false).unwrap();
-        let (header, body) = read_202_message(lock.stream_mut(), Validation::from(key)).unwrap();
+        let mut lock = session.connection.inner.lock().await;
+        write_202_message(lock.stream_mut(), key, header, &request_body, false)
+            .await
+            .unwrap();
+        let (header, body) = read_202_message(lock.stream_mut(), Validation::from(key))
+            .await
+            .unwrap();
         drop(lock);
         if let Some(code) = NonZero::new(header.status) {
             return Err(ServerError::handle_error_body(code, &body));
@@ -78,7 +85,7 @@ impl FileHandle {
             end_of_file,
             attributes,
             id,
-        } = CreateResponse::read_from(body.as_ref()).unwrap();
+        } = CreateResponse::read_from(&mut body.as_ref()).await.unwrap();
         Ok(FileHandle {
             oplock_level,
             offset: 0,
@@ -92,22 +99,26 @@ impl FileHandle {
             change_time,
         })
     }
-    pub fn read_raw(
+    pub async fn read_raw(
         &mut self,
         length: u32,
         minimum_count: u32,
     ) -> Result<Box<[u8]>, ReadFileError> {
+        println!(
+            "read_raw called with offset={}, remaining={}",
+            self.offset, length
+        );
         let header = SyncHeader202Outgoing::from_tree_con(&self.tree_connection, Command202::Read);
         let session = self.tree_connection.session();
         let key = session
             .requires_signing()
             .then_some(session.session_key())
             .copied();
-        let mut lock = session.connection.inner.lock().unwrap();
+        let mut lock = session.connection.inner.lock().await;
         write_202_message(
             lock.stream_mut(),
             key,
-            header,
+            dbg!(header),
             &ReadRequest {
                 length,
                 offset: self.offset,
@@ -116,12 +127,14 @@ impl FileHandle {
             },
             true,
         )
+        .await
         .map_err(|e| match e {
             WriteError::Connection(io) => ReadFileError::Io(io),
             WriteError::MessageTooLong => ReadFileError::InvalidMessage,
         })?;
-        let (header, body) =
-            read_202_message(lock.stream_mut(), Validation::from(key)).map_err(|e| match e {
+        let (header, body) = read_202_message(lock.stream_mut(), Validation::from(key))
+            .await
+            .map_err(|e| match e {
                 MsgReadError::NetBIOS
                 | MsgReadError::NotSigned
                 | MsgReadError::InvalidSignature
@@ -132,76 +145,102 @@ impl FileHandle {
         if let Some(code) = NonZero::new(header.status) {
             return Err(ServerError::handle_error_body(code, &body));
         }
-        match ReadResponse::read_from(Cursor::new(body)) {
+        match ReadResponse::read_from(Cursor::new(body)).await {
             Ok(ok) => Ok(ok.into_inner()),
             Err(ReadResponseError::Io(io)) => Err(ReadFileError::Io(io)),
             Err(ReadResponseError::InvalidMessage) => Err(ReadFileError::InvalidMessage),
         }
     }
-    fn send_close(&mut self) -> Result<(), std::io::Error> {
-        let header = SyncHeader202Outgoing::from_tree_con(&self.tree_connection, Command202::Close);
-        let session = self.tree_connection.session();
+    async fn send_close(&mut self) -> Result<(), std::io::Error> {
+        Self::send_close_raw(self.tree_connection.clone(), self.id).await
+    }
+    async fn send_close_raw(
+        tree_connection: Arc<TreeConnection>,
+        id: FileId,
+    ) -> Result<(), std::io::Error> {
+        let header = SyncHeader202Outgoing::from_tree_con(&tree_connection, Command202::Close);
+        let session = tree_connection.session();
         let session_key = session
             .requires_signing()
             .then_some(session.session_key())
             .copied();
-        let mut lock = session.connection.inner.lock().unwrap();
+        let mut lock = session.connection.inner.lock().await;
         write_202_message(
             lock.stream_mut(),
             session_key,
             header,
-            &CloseRequest { id: self.id },
+            &CloseRequest { id },
             false,
         )
+        .await
         .unwrap();
-        let (header, body) =
-            read_202_message(lock.stream_mut(), Validation::from(session_key)).unwrap();
+        let (header, body) = read_202_message(lock.stream_mut(), Validation::from(session_key))
+            .await
+            .unwrap();
         drop(lock);
         if let Some(code) = NonZero::new(header.status) {
             panic!("Error with code {code}");
         }
-        let _body = CloseResponse::read_from(body.as_ref()).unwrap();
+        let _body = CloseResponse::read_from(&mut body.as_ref()).await.unwrap();
         Ok(())
     }
-    pub fn close(mut self) -> Result<(), std::io::Error> {
-        self.send_close()
+    pub async fn close(mut self) -> Result<(), std::io::Error> {
+        self.send_close().await
     }
 }
 impl Drop for FileHandle {
     fn drop(&mut self) {
-        let _ = self.send_close();
+        let fut = Self::send_close_raw(self.tree_connection.clone(), self.id);
+        tokio::spawn(fut);
     }
 }
-const SMB2_READ_MAX: u64 = 65536;
-impl Read for FileHandle {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let until_end = self.end_of_file - self.offset;
-        let maximum_readable = until_end.min(SMB2_READ_MAX) as u32;
-        let len = buf
-            .len()
-            .try_into()
-            .unwrap_or(u32::MAX)
-            .min(maximum_readable);
-        match self.read_raw(len, 0) {
-            Ok(outbuf) => {
-                assert!(outbuf.len() <= len as usize);
-                self.offset += outbuf.len() as u64;
-                buf[0..outbuf.len()].copy_from_slice(&outbuf);
-                Ok(outbuf.len())
+impl AsyncRead for FileHandle {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let until_end = self.end_of_file.saturating_sub(self.offset);
+        if until_end == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        let fut = async move {
+            let max_protocol = self.tree_connection.session().connection.max_read_size() as u64;
+            let max_wanted = buf.remaining() as u64;
+            let to_request = until_end.min(max_protocol).min(max_wanted) as u32;
+            if to_request == 0 {
+                return Ok(());
             }
-            Err(rd) => Err(rd.collapse_to_io_error()),
+
+            match self.read_raw(to_request, 0).await {
+                Ok(outbuf) => {
+                    assert!(outbuf.len() <= to_request as usize);
+                    self.offset += outbuf.len() as u64;
+                    buf.put_slice(&outbuf);
+                    Ok(())
+                }
+                Err(rd) => Err(rd.collapse_to_io_error()),
+            }
+        };
+        tokio::pin!(fut);
+        match fut.poll(cx) {
+            Poll::Ready(res) => Poll::Ready(res),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
-impl Seek for FileHandle {
-    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+impl AsyncSeek for FileHandle {
+    fn start_seek(mut self: Pin<&mut Self>, pos: SeekFrom) -> std::io::Result<()> {
         let new = match pos {
             SeekFrom::Start(s) => s,
             SeekFrom::Current(c) => self.offset.saturating_add_signed(c),
             SeekFrom::End(c) => self.end_of_file.saturating_add_signed(c),
         };
         self.offset = new;
-        Ok(new)
+        Ok(())
+    }
+    fn poll_complete(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<u64>> {
+        Poll::Ready(Ok(self.offset))
     }
 }
 
@@ -217,39 +256,40 @@ struct FileCreateRequest<'p> {
     path: &'p str,
 }
 impl FileCreateRequest<'_> {
-    fn write_into<W: Write>(&self, mut w: W) -> Result<(), std::io::Error> {
-        w.write_all(&57u16.to_le_bytes())?;
-        w.write_all(&[0])?;
+    async fn write_into<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<(), std::io::Error> {
+        w.write_all(&57u16.to_le_bytes()).await?;
+        w.write_all(&[0]).await?;
         let oplock_byte: u8 = match self.oplock_level {
             None => 0x00,
             Some(OplockLevel202::II) => 0x01,
             Some(OplockLevel202::Exclusive) => 0x08,
             Some(OplockLevel202::Batch) => 0x09,
         };
-        w.write_all(&[oplock_byte])?;
+        w.write_all(&[oplock_byte]).await?;
         let imp_byte: u8 = match self.impersonation_level {
             ImpersonationLevel::Anonymous => 0x00,
             ImpersonationLevel::Identification => 0x01,
             ImpersonationLevel::Impersonation => 0x02,
             ImpersonationLevel::Delegate => 0x03,
         };
-        w.write_all(&u32::from(imp_byte).to_le_bytes())?;
-        w.write_all(&0u64.to_le_bytes())?;
-        w.write_all(&0u64.to_le_bytes())?;
-        w.write_all(&self.desired_access.0.to_le_bytes())?;
-        w.write_all(&self.file_attributes.to_le_bytes())?;
-        w.write_all(&self.share_access.0.to_le_bytes())?;
-        w.write_all(&self.create_disposition.to_u32().to_le_bytes())?;
+        w.write_all(&u32::from(imp_byte).to_le_bytes()).await?;
+        w.write_all(&0u64.to_le_bytes()).await?;
+        w.write_all(&0u64.to_le_bytes()).await?;
+        w.write_all(&self.desired_access.0.to_le_bytes()).await?;
+        w.write_all(&self.file_attributes.to_le_bytes()).await?;
+        w.write_all(&self.share_access.0.to_le_bytes()).await?;
+        w.write_all(&self.create_disposition.to_u32().to_le_bytes())
+            .await?;
         // TODO create options
-        w.write_all(&self.create_options.to_le_bytes())?;
+        w.write_all(&self.create_options.to_le_bytes()).await?;
         let path = crate::to_wide(self.path);
         let offset: u16 = 64 + 56;
-        w.write_all(&offset.to_le_bytes())?;
-        w.write_all(&(path.len() as u16).to_le_bytes())?;
+        w.write_all(&offset.to_le_bytes()).await?;
+        w.write_all(&(path.len() as u16).to_le_bytes()).await?;
         let create_contexts_offset: u32 = 0;
-        w.write_all(&create_contexts_offset.to_le_bytes())?;
-        w.write_all(&0u32.to_le_bytes())?;
-        w.write_all(&path)?;
+        w.write_all(&create_contexts_offset.to_le_bytes()).await?;
+        w.write_all(&0u32.to_le_bytes()).await?;
+        w.write_all(&path).await?;
         Ok(())
     }
 }
@@ -258,8 +298,8 @@ impl MessageBody for FileCreateRequest<'_> {
     fn size_hint(&self) -> usize {
         56 + (self.path.chars().count() * 2)
     }
-    fn write_to<W: Write>(&self, w: W) -> Result<(), Self::Err> {
-        self.write_into(w)
+    async fn write_to<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<(), Self::Err> {
+        self.write_into(w).await
     }
 }
 
@@ -392,12 +432,12 @@ struct CreateResponse {
 }
 impl CreateResponse {
     const STRUCTURE_SIZE: u16 = 89;
-    fn read_from<R: Read>(mut r: R) -> Result<Self, ReadError> {
-        if r.read_u16()? != Self::STRUCTURE_SIZE {
+    async fn read_from<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Self, ReadError> {
+        if r.read_u16_le().await? != Self::STRUCTURE_SIZE {
             return Err(ReadError::InvalidStructureSize);
         }
         let mut oplock = 0;
-        r.read_exact(std::slice::from_mut(&mut oplock))?;
+        r.read_exact(std::slice::from_mut(&mut oplock)).await?;
         let oplock_level = match oplock {
             0x00 => None,
             0x01 => Some(OplockLevel202::II),
@@ -406,34 +446,34 @@ impl CreateResponse {
             _ => return Err(ReadError::InvalidOplockLevel),
         };
         // flags
-        r.read_exact(&mut [0])?;
-        let create_action = match r.read_u32()? {
+        r.read_exact(&mut [0]).await?;
+        let create_action = match r.read_u32_le().await? {
             0x00 => CreateActionTaken::Superseded,
             0x01 => CreateActionTaken::Opened,
             0x02 => CreateActionTaken::Created,
             0x03 => CreateActionTaken::Overwritten,
             _ => return Err(ReadError::InvalidCreateAction),
         };
-        let creation_time = r.read_u64()?;
-        let last_access_time = r.read_u64()?;
-        let last_write_time = r.read_u64()?;
-        let change_time = r.read_u64()?;
-        let allocation_size = r.read_u64()?;
-        let end_of_file = r.read_u64()?;
-        let attributes = r.read_u32()?;
-        let _ = r.read_u32()?;
+        let creation_time = r.read_u64_le().await?;
+        let last_access_time = r.read_u64_le().await?;
+        let last_write_time = r.read_u64_le().await?;
+        let change_time = r.read_u64_le().await?;
+        let allocation_size = r.read_u64_le().await?;
+        let end_of_file = r.read_u64_le().await?;
+        let attributes = r.read_u32_le().await?;
+        let _ = r.read_u32_le().await?;
         let mut persistent = [0u8; 8];
-        r.read_exact(&mut persistent)?;
+        r.read_exact(&mut persistent).await?;
         let mut volatile = [0u8; 8];
-        r.read_exact(&mut volatile)?;
+        r.read_exact(&mut volatile).await?;
         let id = FileId {
             persistent,
             volatile,
         };
-        let create_contexts_offset = r.read_u32()?;
-        let create_contexts_length = r.read_u32()?;
+        let create_contexts_offset = r.read_u32_le().await?;
+        let create_contexts_length = r.read_u32_le().await?;
         let mut _ctx = vec![0; (create_contexts_length + create_contexts_offset) as usize];
-        r.read_exact(&mut _ctx)?;
+        r.read_exact(&mut _ctx).await?;
         Ok(CreateResponse {
             oplock_level,
             create_action,

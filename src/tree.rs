@@ -1,12 +1,13 @@
 use std::{
     borrow::Borrow,
-    io::{Cursor, Read, Seek, Write},
+    io::{Cursor, SeekFrom},
     num::NonZero,
     sync::Arc,
 };
 
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
 use crate::{
-    ReadLe,
     error::{ErrorResponse2, ServerError},
     file::{FileHandle, OpenError},
     header::{Command202, SyncHeader202Outgoing},
@@ -26,7 +27,7 @@ pub struct TreeConnection {
     id: u32,
 }
 impl TreeConnection {
-    pub fn new(
+    pub async fn new(
         session: Arc<Session202>,
         path: &str,
     ) -> Result<Arc<TreeConnection>, TreeConnectError> {
@@ -38,21 +39,23 @@ impl TreeConnection {
         if let Err(e) = parse_share_path(path) {
             return Err(TreeConnectError::InvalidPath(e));
         };
-        let mut lock = session.connection.inner.lock().unwrap();
+        let mut lock = session.connection.inner.lock().await;
         write_202_message(
             lock.stream_mut(),
             session_key,
             tc_header,
             &TreeConnectRequest(path),
             false,
-        )?;
-        let (header, msg) =
-            read_202_message(lock.stream_mut(), Validation::from(session_key)).unwrap();
+        )
+        .await?;
+        let (header, msg) = read_202_message(lock.stream_mut(), Validation::from(session_key))
+            .await
+            .unwrap();
         drop(lock);
         if let Some(code) = NonZero::new(header.status) {
             return Err(ServerError::handle_error_body(code, &msg));
         }
-        let response = TreeConnectResponse::read_from(Cursor::new(msg))?;
+        let response = TreeConnectResponse::read_from(&mut Cursor::new(msg)).await?;
         let tree = TreeConnection {
             session,
             share_type: response.share_type,
@@ -71,27 +74,31 @@ impl TreeConnection {
     pub fn id(&self) -> u32 {
         self.id
     }
-    pub fn open_file(self: Arc<Self>, path: &str) -> Result<FileHandle, OpenError> {
-        FileHandle::new(self, path)
+    pub async fn open_file(self: Arc<Self>, path: &str) -> Result<FileHandle, OpenError> {
+        FileHandle::new(self, path).await
     }
 }
 impl Drop for TreeConnection {
     fn drop(&mut self) {
-        let header = SyncHeader202Outgoing::from_tree_con(self, Command202::TreeDisconnect);
-        let session = &self.session;
+        let session = self.session.clone();
         let key = session.requires_signing().then_some(*session.session_key());
-        let mut lock = session.connection.inner.lock().unwrap();
-        let _ = write_202_message(
-            lock.stream_mut(),
-            key,
-            header,
-            &TreeDisconnectRequest,
-            false,
-        );
-        let Ok((_header, body)) = read_202_message(lock.stream_mut(), Validation::from(key)) else {
-            return;
-        };
-        let _ = TreeDisconnectResponse::read_from(body.as_ref());
+        let header = SyncHeader202Outgoing::from_tree_con(self, Command202::TreeDisconnect);
+        tokio::spawn(async move {
+            let mut lock = session.connection.inner.lock().await;
+            let _ = write_202_message(
+                lock.stream_mut(),
+                key,
+                header,
+                &TreeDisconnectRequest,
+                false,
+            );
+            let Ok((_header, body)) =
+                read_202_message(lock.stream_mut(), Validation::from(key)).await
+            else {
+                return;
+            };
+            let _ = TreeDisconnectResponse::read_from(&mut body.as_ref());
+        });
     }
 }
 
@@ -160,13 +167,13 @@ pub enum InvalidSharePath {
 struct TreeConnectRequest<'s>(&'s str);
 impl TreeConnectRequest<'_> {
     const STRUCTURE_SIZE: u16 = 9;
-    fn write_into<W: Write>(&self, mut w: W) -> Result<(), WriteError> {
-        w.write_all(&Self::STRUCTURE_SIZE.to_le_bytes())?;
-        w.write_all(&0u16.to_le_bytes())?;
+    async fn write_into<W: AsyncWriteExt + Unpin>(&self, w: &mut W) -> Result<(), WriteError> {
+        w.write_all(&Self::STRUCTURE_SIZE.to_le_bytes()).await?;
+        w.write_all(&0u16.to_le_bytes()).await?;
         let utf16 = crate::to_wide(self.0);
-        w.write_all(&(64 + 8u16).to_le_bytes())?;
-        w.write_all(&(utf16.len() as u16).to_le_bytes())?;
-        w.write_all(&utf16)?;
+        w.write_all(&(64 + 8u16).to_le_bytes()).await?;
+        w.write_all(&(utf16.len() as u16).to_le_bytes()).await?;
+        w.write_all(&utf16).await?;
         Ok(())
     }
 }
@@ -175,8 +182,8 @@ impl MessageBody for TreeConnectRequest<'_> {
     fn size_hint(&self) -> usize {
         8 + (self.0.len() * 2)
     }
-    fn write_to<W: Write>(&self, w: W) -> Result<(), Self::Err> {
-        self.write_into(w)
+    async fn write_to<W: AsyncWriteExt + Unpin>(&self, w: &mut W) -> Result<(), Self::Err> {
+        self.write_into(w).await
     }
 }
 
@@ -198,23 +205,25 @@ struct TreeConnectResponse {
     maximal_access: u32,
 }
 impl TreeConnectResponse {
-    fn read_from<R: Read + Seek>(mut r: R) -> Result<Self, ReadError> {
-        if r.read_u16()? != 16 {
+    async fn read_from<R: AsyncReadExt + AsyncSeekExt + Unpin>(
+        r: &mut R,
+    ) -> Result<Self, ReadError> {
+        if r.read_u16_le().await? != 16 {
             return Err(ReadError::InvalidSize);
         }
         let mut share = 0;
-        r.read_exact(std::slice::from_mut(&mut share))?;
+        r.read_exact(std::slice::from_mut(&mut share)).await?;
         let share_type = match share {
             0x01 => ShareType::Disk,
             0x02 => ShareType::Pipe,
             0x03 => ShareType::Printer,
             _ => return Err(ReadError::InvalidShareType),
         };
-        r.seek_relative(1)?;
-        let flags = r.read_u32()?;
+        r.seek(SeekFrom::Current(1)).await?;
+        let flags = r.read_u32_le().await?;
         // Todo cache check
-        let capabilities = r.read_u32()?;
-        let maximal_access = r.read_u32()?;
+        let capabilities = r.read_u32_le().await?;
+        let maximal_access = r.read_u32_le().await?;
         Ok(Self {
             share_type,
             flags,
@@ -246,9 +255,9 @@ pub enum ShareType {
 #[derive(Clone, Copy, Debug)]
 struct TreeDisconnectRequest;
 impl TreeDisconnectRequest {
-    fn write_into<W: Write>(self, mut w: W) -> Result<(), std::io::Error> {
-        w.write_all(&4u16.to_le_bytes())?;
-        w.write_all(&0u16.to_le_bytes())?;
+    async fn write_into<W: AsyncWriteExt + Unpin>(self, w: &mut W) -> Result<(), std::io::Error> {
+        w.write_all(&4u16.to_le_bytes()).await?;
+        w.write_all(&0u16.to_le_bytes()).await?;
         Ok(())
     }
 }
@@ -257,19 +266,19 @@ impl MessageBody for TreeDisconnectRequest {
     fn size_hint(&self) -> usize {
         8
     }
-    fn write_to<W: Write>(&self, w: W) -> Result<(), Self::Err> {
-        (*self).write_into(w)
+    async fn write_to<W: AsyncWriteExt + Unpin>(&self, w: &mut W) -> Result<(), Self::Err> {
+        (*self).write_into(w).await
     }
 }
 
 #[derive(Clone, Copy, Debug)]
 struct TreeDisconnectResponse;
 impl TreeDisconnectResponse {
-    fn read_from<R: Read>(mut r: R) -> Result<Self, ReadDisconnectError> {
-        if r.read_u16()? != 4 {
+    async fn read_from<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Self, ReadDisconnectError> {
+        if r.read_u16_le().await? != 4 {
             return Err(ReadDisconnectError::InvalidSize);
         };
-        let _ignored = r.read_u16()?;
+        let _ignored = r.read_u16_le().await?;
         Ok(Self)
     }
 }

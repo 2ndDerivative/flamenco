@@ -1,22 +1,24 @@
 use std::{
     fmt::Debug,
-    io::{Error as IoError, ErrorKind, Read, Write},
+    io::{Error as IoError, ErrorKind},
 };
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 const STATUS_PENDING: u32 = 0x00000103;
 
 use crate::header::{FLAG_SIGNED, SyncHeader202Incoming, SyncHeader202Outgoing};
 
 /// Signature validation and netBIOS stuff should be happening here
-pub fn read_202_message<R: Read>(
-    mut r: R,
+pub async fn read_202_message<R: AsyncRead + Unpin>(
+    r: &mut R,
     validation: Validation,
 ) -> Result<(SyncHeader202Incoming, Box<[u8]>), ReadError> {
     let mut bios_size = [0u8; 4];
     r.read_exact(&mut bios_size)
+        .await
         .map_err(ReadError::Connection)?;
     let message_size = match u32::from_be_bytes(bios_size) {
         0..64 => {
@@ -30,11 +32,13 @@ pub fn read_202_message<R: Read>(
     };
     let mut header_bytes = [0u8; 64];
     r.read_exact(&mut header_bytes)
+        .await
         .map_err(ReadError::Connection)?;
     let header = SyncHeader202Incoming::from_bytes(&header_bytes).unwrap();
     let message_body_size = (message_size - 64) as usize;
     let mut message_body = vec![0u8; message_body_size].into_boxed_slice();
     r.read_exact(&mut message_body)
+        .await
         .map_err(ReadError::Connection)?;
     let is_signed = header.flags & FLAG_SIGNED != 0;
     match validation {
@@ -103,8 +107,8 @@ pub enum ReadError {
 }
 
 /// Sets the SIGNED flag depending on the signing key being provided
-pub fn write_202_message<W: Write, M: MessageBody>(
-    mut w: W,
+pub async fn write_202_message<W: AsyncWrite + Unpin, M: MessageBody>(
+    w: &mut W,
     sign_with_key: Option<[u8; 16]>,
     mut header: SyncHeader202Outgoing,
     body: &M,
@@ -114,8 +118,8 @@ pub fn write_202_message<W: Write, M: MessageBody>(
     if sign_with_key.is_some() {
         header.flags |= FLAG_SIGNED;
     }
-    buffer.write_all(&header.to_bytes()).unwrap();
-    body.write_to(&mut buffer).unwrap();
+    buffer.write_all(&header.to_bytes()).await.unwrap();
+    body.write_to(&mut buffer).await.unwrap();
     if add_null {
         buffer.push(0);
     }
@@ -131,8 +135,9 @@ pub fn write_202_message<W: Write, M: MessageBody>(
                     .copy_from_slice(hash_result.into_bytes().first_chunk::<16>().unwrap());
             }
             w.write_all(&(len as u32).to_be_bytes())
+                .await
                 .map_err(WriteError::Connection)?;
-            w.write_all(&buffer).map_err(WriteError::Connection)?;
+            w.write_all(&buffer).await.map_err(WriteError::Connection)?;
             Ok(())
         }
     }
@@ -146,7 +151,7 @@ pub enum WriteError {
 
 pub(crate) trait MessageBody {
     type Err: Debug;
-    fn write_to<W: Write>(&self, w: W) -> Result<(), Self::Err>;
+    async fn write_to<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<(), Self::Err>;
     fn size_hint(&self) -> usize {
         0
     }

@@ -1,8 +1,14 @@
 use std::{
     io::Cursor,
-    net::{TcpStream, ToSocketAddrs},
     num::NonZero,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
+use tokio::{
+    net::{TcpStream, ToSocketAddrs},
+    sync::Mutex,
 };
 
 use kenobi::cred::{Credentials, Outbound};
@@ -39,25 +45,19 @@ impl Client202 {
         }
         .into()
     }
-    pub fn connect(
+    pub async fn connect(
         self: Arc<Self>,
         addr: impl ToSocketAddrs,
     ) -> Result<Arc<Connection>, ConnectError> {
-        Connection::new(self, addr)
+        Connection::new(self, addr).await
     }
 }
 
 #[derive(Debug)]
 pub struct ConnectionInner {
-    message_id: u64,
     tcp: TcpStream,
 }
 impl ConnectionInner {
-    pub(crate) fn fetch_increment_message_id(&mut self) -> u64 {
-        let num = self.message_id;
-        self.message_id += 1;
-        num
-    }
     pub(crate) fn stream_mut(&mut self) -> &mut TcpStream {
         &mut self.tcp
     }
@@ -66,6 +66,7 @@ impl ConnectionInner {
 #[derive(Debug)]
 pub struct Connection {
     pub(crate) client: Arc<Client202>,
+    message_id: AtomicU64,
     pub(crate) inner: Mutex<ConnectionInner>,
     max_transaction_size: u32,
     max_read_size: u32,
@@ -73,6 +74,9 @@ pub struct Connection {
     server_requires_signing: bool,
 }
 impl Connection {
+    pub(crate) fn fetch_increment_message_id(&self) -> u64 {
+        self.message_id.fetch_add(1, Ordering::Relaxed)
+    }
     pub fn max_transaction_size(&self) -> u32 {
         self.max_transaction_size
     }
@@ -85,18 +89,18 @@ impl Connection {
     pub fn server_requires_signing(&self) -> bool {
         self.server_requires_signing
     }
-    pub fn setup_session(
+    pub async fn setup_session(
         self: Arc<Self>,
         credentials: &Credentials<Outbound>,
         target_spn: Option<&str>,
     ) -> Result<Arc<Session202>, SessionSetupError> {
-        Session202::new(self, credentials, target_spn)
+        Session202::new(self, credentials, target_spn).await
     }
-    pub fn new(
+    pub async fn new(
         client: Arc<Client202>,
         addr: impl ToSocketAddrs,
     ) -> Result<Arc<Connection>, ConnectError> {
-        let mut tcp = TcpStream::connect(addr)?;
+        let mut tcp = TcpStream::connect(addr).await?;
         let neg_header = SyncHeader202Outgoing {
             command: Command202::Negotiate,
             credits: 1,
@@ -110,16 +114,16 @@ impl Connection {
             capabilities: 0,
             security_mode: SecurityMode::None,
         };
-        write_202_message(&mut tcp, None, neg_header, &neg_req, false)?;
+        write_202_message(&mut tcp, None, neg_header, &neg_req, false).await?;
 
-        let (header, body) = read_202_message(&mut tcp, Validation::ExpectNone)?;
+        let (header, body) = read_202_message(&mut tcp, Validation::ExpectNone).await?;
         if let Some(code) = NonZero::new(header.status) {
             return Err(ConnectError::handle_error_body(code, &body));
         }
         if header.command != Command202::Negotiate || header.message_id != 0 {
             return Err(ConnectError::InvalidMessage);
         }
-        let neg_resp = NegotiateResponse::read_from(Cursor::new(body))?;
+        let neg_resp = NegotiateResponse::read_from(&mut Cursor::new(body)).await?;
         if neg_resp.max_transact_size < MINIMUM_TRANSACT_SIZE
             || neg_resp.max_read_size < MINIMUM_TRANSACT_SIZE
             || neg_resp.max_write_size < MINIMUM_TRANSACT_SIZE
@@ -135,7 +139,8 @@ impl Connection {
 
         Ok(Connection {
             client,
-            inner: Mutex::new(ConnectionInner { message_id: 1, tcp }),
+            message_id: 1.into(),
+            inner: Mutex::new(ConnectionInner { tcp }),
             max_transaction_size: neg_resp.max_transact_size,
             max_read_size: neg_resp.max_read_size,
             max_write_size: neg_resp.max_write_size,
