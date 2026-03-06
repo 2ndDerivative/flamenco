@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use flamenco::{client::Client202, session::Session202, tree::TreeConnection};
 use kenobi::cred::Credentials;
 use tokio::io::AsyncReadExt;
@@ -24,5 +22,5 @@ async fn main() {
     let mut file2 = other_tree.open_file(&file_path).await.unwrap();
     let mut s = String::new();
     file2.read_to_string(&mut s).await.unwrap();
-    println!("Read from main thread: {s}");
+    println!("Read file: {s}");
 }
