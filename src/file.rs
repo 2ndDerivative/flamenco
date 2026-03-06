@@ -54,7 +54,7 @@ impl FileHandle {
                 | AccessMask::READ_CONTROL,
             file_attributes: 0x0,
             create_options: 0x40 | 0x200,
-            share_access: ShareAccess::SHARE_READ | ShareAccess::SHARE_WRITE,
+            share_access: ShareAccess::SHARE_READ,
             create_disposition: CreateDisposition::Open,
             path,
         };
