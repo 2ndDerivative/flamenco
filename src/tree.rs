@@ -91,13 +91,14 @@ impl Drop for TreeConnection {
                 header,
                 &TreeDisconnectRequest,
                 false,
-            );
+            )
+            .await;
             let Ok((_header, body)) =
                 read_202_message(lock.stream_mut(), Validation::from(key)).await
             else {
                 return;
             };
-            let _ = TreeDisconnectResponse::read_from(&mut body.as_ref());
+            let _ = TreeDisconnectResponse::read_from(&mut body.as_ref()).await;
         });
     }
 }
