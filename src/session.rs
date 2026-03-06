@@ -68,9 +68,7 @@ impl Session202 {
         loop {
             let client = &connection.client;
             let mut connection_lock = connection.inner.lock().unwrap();
-            let Some(message_id) = connection_lock.fetch_increment_message_id() else {
-                return Err(SessionSetupError::OutOfCredits);
-            };
+            let message_id = connection_lock.fetch_increment_message_id();
             let header = SyncHeader202Outgoing {
                 command: Command202::SessionSetup,
                 credits: 256,
@@ -92,9 +90,8 @@ impl Session202 {
             };
             write_202_message(connection_lock.stream_mut(), None, header, &body, false)?;
             let message_buffer = buffer_for_delayed_validation(connection_lock.stream_mut())?;
-            let (header, body) = read_202_message(&mut message_buffer.as_ref(), Validation::Skip)?;
-            connection_lock.add_credits(header.credits);
             drop(connection_lock);
+            let (header, body) = read_202_message(&mut message_buffer.as_ref(), Validation::Skip)?;
             // Lookup session ID
             if let Some(code) = NonZero::new(header.status)
                 && code.get() != ERROR_MORE_PROCESSING_REQUIRED
@@ -153,25 +150,18 @@ impl Session202 {
 impl Drop for Session202 {
     fn drop(&mut self) {
         let mut lock = self.connection.inner.lock().unwrap();
-        let Some(message_id) = lock.fetch_increment_message_id() else {
-            return;
-        };
         let logoff_header = SyncHeader202Outgoing {
             command: Command202::Logoff,
             credits: 0,
             flags: 0,
             next_command: None,
-            message_id,
+            message_id: lock.fetch_increment_message_id(),
             tree_id: 0,
             session_id: self.id,
         };
         let key = self.requires_signing().then_some(self.session_key);
         let _ = write_202_message(lock.stream_mut(), key, logoff_header, &LogoffRequest, false);
-        let Ok((h, _)) = read_202_message(lock.stream_mut(), Validation::Key(self.session_key))
-        else {
-            return;
-        };
-        lock.add_credits(h.credits);
+        let _ = read_202_message(lock.stream_mut(), Validation::Key(self.session_key));
     }
 }
 
@@ -206,7 +196,6 @@ pub enum SessionSetupError {
     AuthContextTokenTooLong,
     SessionKeyTooShort,
     InvalidMessage,
-    OutOfCredits,
     ServerError {
         code: NonZero<u32>,
         body: ErrorResponse2,

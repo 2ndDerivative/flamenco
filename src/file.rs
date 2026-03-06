@@ -1,5 +1,5 @@
 use std::{
-    io::{Cursor, ErrorKind, Read, Seek, SeekFrom, Write},
+    io::{Cursor, Read, Seek, SeekFrom, Write},
     num::NonZero,
     ops::BitOr,
     sync::Arc,
@@ -41,11 +41,7 @@ impl FileHandle {
         tree_connection: Arc<TreeConnection>,
         path: &str,
     ) -> Result<FileHandle, OpenError> {
-        let Some(header) =
-            SyncHeader202Outgoing::from_tree_con(&tree_connection, Command202::Create)
-        else {
-            return Err(OpenError::OutOfCredits);
-        };
+        let header = SyncHeader202Outgoing::from_tree_con(&tree_connection, Command202::Create);
         let request_body = FileCreateRequest {
             oplock_level: None,
             impersonation_level: ImpersonationLevel::Impersonation,
@@ -67,7 +63,6 @@ impl FileHandle {
         let mut lock = session.connection.inner.lock().unwrap();
         write_202_message(lock.stream_mut(), key, header, &request_body, false).unwrap();
         let (header, body) = read_202_message(lock.stream_mut(), Validation::from(key)).unwrap();
-        lock.add_credits(header.credits);
         drop(lock);
         if let Some(code) = NonZero::new(header.status) {
             return Err(ServerError::handle_error_body(code, &body));
@@ -102,11 +97,7 @@ impl FileHandle {
         length: u32,
         minimum_count: u32,
     ) -> Result<Box<[u8]>, ReadFileError> {
-        let Some(header) =
-            SyncHeader202Outgoing::from_tree_con(&self.tree_connection, Command202::Read)
-        else {
-            return Err(ReadFileError::OutOfCredits);
-        };
+        let header = SyncHeader202Outgoing::from_tree_con(&self.tree_connection, Command202::Read);
         let session = self.tree_connection.session();
         let key = session
             .requires_signing()
@@ -137,7 +128,6 @@ impl FileHandle {
                 | MsgReadError::InvalidlySignedMessage => ReadFileError::InvalidMessage,
                 MsgReadError::Connection(io) => ReadFileError::Io(io),
             })?;
-        lock.add_credits(header.credits);
         drop(lock);
         if let Some(code) = NonZero::new(header.status) {
             return Err(ServerError::handle_error_body(code, &body));
@@ -149,14 +139,7 @@ impl FileHandle {
         }
     }
     fn send_close(&mut self) -> Result<(), std::io::Error> {
-        let Some(header) =
-            SyncHeader202Outgoing::from_tree_con(&self.tree_connection, Command202::Close)
-        else {
-            return Err(std::io::Error::new(
-                ErrorKind::PermissionDenied,
-                "client ran out of credits",
-            ));
-        };
+        let header = SyncHeader202Outgoing::from_tree_con(&self.tree_connection, Command202::Close);
         let session = self.tree_connection.session();
         let session_key = session
             .requires_signing()
@@ -173,7 +156,6 @@ impl FileHandle {
         .unwrap();
         let (header, body) =
             read_202_message(lock.stream_mut(), Validation::from(session_key)).unwrap();
-        lock.add_credits(header.credits);
         drop(lock);
         if let Some(code) = NonZero::new(header.status) {
             panic!("Error with code {code}");
@@ -285,7 +267,6 @@ impl MessageBody for FileCreateRequest<'_> {
 pub enum OpenError {
     Io(std::io::Error),
     InvalidMessage,
-    OutOfCredits,
     ServerError {
         code: NonZero<u32>,
         body: ErrorResponse2,

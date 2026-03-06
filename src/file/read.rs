@@ -1,5 +1,5 @@
 use std::{
-    io::{ErrorKind, Read, Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom, Write},
     num::NonZero,
 };
 
@@ -96,7 +96,6 @@ impl From<std::io::Error> for ReadResponseError {
 pub enum ReadFileError {
     Io(std::io::Error),
     InvalidMessage,
-    OutOfCredits,
     ServerError {
         code: NonZero<u32>,
         body: ErrorResponse2,
@@ -105,12 +104,10 @@ pub enum ReadFileError {
 impl ReadFileError {
     pub fn collapse_to_io_error(self) -> std::io::Error {
         match self {
-            ReadFileError::InvalidMessage => {
-                std::io::Error::new(ErrorKind::InvalidData, "server sent an invalid message")
-            }
-            ReadFileError::OutOfCredits => {
-                std::io::Error::new(ErrorKind::PermissionDenied, "client ran out of credits")
-            }
+            ReadFileError::InvalidMessage => std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "server sent an invalid message",
+            ),
             ReadFileError::Io(io) => io,
             ReadFileError::ServerError { code, body } => {
                 dbg!(code, body);

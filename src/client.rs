@@ -2,7 +2,6 @@ use std::{
     io::Cursor,
     net::{TcpStream, ToSocketAddrs},
     num::NonZero,
-    ops::RangeInclusive,
     sync::{Arc, Mutex},
 };
 
@@ -50,16 +49,14 @@ impl Client202 {
 
 #[derive(Debug)]
 pub struct ConnectionInner {
-    messages: RangeInclusive<u64>,
+    message_id: u64,
     tcp: TcpStream,
 }
 impl ConnectionInner {
-    pub(crate) fn fetch_increment_message_id(&mut self) -> Option<u64> {
-        self.messages.next()
-    }
-    pub(crate) fn add_credits(&mut self, n: u16) {
-        let (start, end) = self.messages.clone().into_inner();
-        self.messages = start..=(end.saturating_add(n.into()));
+    pub(crate) fn fetch_increment_message_id(&mut self) -> u64 {
+        let num = self.message_id;
+        self.message_id += 1;
+        num
     }
     pub(crate) fn stream_mut(&mut self) -> &mut TcpStream {
         &mut self.tcp
@@ -119,7 +116,6 @@ impl Connection {
         if let Some(code) = NonZero::new(header.status) {
             return Err(ConnectError::handle_error_body(code, &body));
         }
-        let messages = 1..=(header.credits as u64);
         if header.command != Command202::Negotiate || header.message_id != 0 {
             return Err(ConnectError::InvalidMessage);
         }
@@ -139,7 +135,7 @@ impl Connection {
 
         Ok(Connection {
             client,
-            inner: Mutex::new(ConnectionInner { messages, tcp }),
+            inner: Mutex::new(ConnectionInner { message_id: 1, tcp }),
             max_transaction_size: neg_resp.max_transact_size,
             max_read_size: neg_resp.max_read_size,
             max_write_size: neg_resp.max_write_size,

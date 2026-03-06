@@ -17,14 +17,14 @@ pub struct SyncHeader202Outgoing {
     pub session_id: u64,
 }
 impl SyncHeader202Outgoing {
-    pub fn from_session(session: &Session202, command: Command202) -> Option<Self> {
+    pub fn from_session(session: &Session202, command: Command202) -> Self {
         let message_id = session
             .connection
             .inner
             .lock()
             .unwrap()
-            .fetch_increment_message_id()?;
-        Some(Self {
+            .fetch_increment_message_id();
+        Self {
             command,
             credits: 0,
             flags: if session.requires_signing() {
@@ -36,14 +36,14 @@ impl SyncHeader202Outgoing {
             message_id,
             tree_id: 0,
             session_id: session.id,
-        })
+        }
     }
-    pub fn from_tree_con(tree_con: &TreeConnection, command: Command202) -> Option<Self> {
-        let header = Self::from_session(tree_con.session(), command)?;
-        Some(Self {
+    pub fn from_tree_con(tree_con: &TreeConnection, command: Command202) -> Self {
+        let header = Self::from_session(tree_con.session(), command);
+        Self {
             tree_id: tree_con.id(),
             ..header
-        })
+        }
     }
     pub fn to_bytes(&self) -> [u8; 64] {
         let mut bytes = [0u8; 64];
