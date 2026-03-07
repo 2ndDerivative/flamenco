@@ -42,9 +42,8 @@ impl TreeConnection {
             .signup_message(
                 tc_header,
                 &TreeConnectRequest(path),
-                session_key,
                 false,
-                Validation::from(session_key),
+                Validation::Immediate(session_key),
             )
             .await
             .map_err(|e| match e {
@@ -92,9 +91,8 @@ impl Drop for TreeConnection {
                 .signup_message(
                     header,
                     &TreeDisconnectRequest,
-                    key,
                     false,
-                    Validation::from(key),
+                    Validation::Immediate(key),
                 )
                 .await
             else {

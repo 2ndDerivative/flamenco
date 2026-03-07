@@ -85,7 +85,7 @@ impl Session202 {
             };
             let (validation, validate) = Validation::setup_delayed();
             let (header, body) = connection
-                .signup_message(header, &body, None, false, validation)
+                .signup_message(header, &body, false, validation)
                 .await
                 .map_err(|su| match su {
                     SignupMessageError::Read(read_error) => SessionSetupError::from(read_error),
@@ -169,9 +169,8 @@ impl Drop for Session202 {
                 .signup_message(
                     logoff_header,
                     &LogoffRequest,
-                    key,
                     false,
-                    Validation::Key(session_key),
+                    Validation::Immediate(key),
                 )
                 .await;
         });

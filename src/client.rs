@@ -79,7 +79,6 @@ impl Connection {
         &self,
         header: SyncHeader202Outgoing,
         msg: &impl MessageBody,
-        sign_with_key: Option<[u8; 16]>,
         add_null: bool,
         incoming_validation: Validation,
     ) -> Result<(Arc<SyncHeader202Incoming>, Arc<[u8]>), SignupMessageError> {
@@ -89,7 +88,6 @@ impl Connection {
             &self.message_id,
             header,
             msg,
-            sign_with_key,
             add_null,
             incoming_validation,
         )
@@ -138,9 +136,8 @@ impl Connection {
             &message_id,
             neg_header,
             &neg_req,
-            None,
             false,
-            Validation::ExpectNone,
+            Validation::Immediate(None),
         )
         .await
         .map_err(|e| match e {
@@ -183,11 +180,14 @@ impl Connection {
         id: &AtomicU64,
         mut header: SyncHeader202Outgoing,
         msg: &impl MessageBody,
-        sign_with_key: Option<[u8; 16]>,
         add_null: bool,
         incoming_validation: Validation,
     ) -> Result<(Arc<SyncHeader202Incoming>, Arc<[u8]>), SignupMessageError> {
         header.message_id = id.fetch_add(1, Ordering::Relaxed);
+        let sign_with_key = match incoming_validation {
+            Validation::Immediate(k) => k,
+            Validation::Delayed(_, _) => None,
+        };
         message::write_202_message(tcp, sign_with_key, header, msg, add_null)
             .await
             .map_err(SignupMessageError::Write)?;

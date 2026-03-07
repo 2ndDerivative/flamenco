@@ -5,11 +5,9 @@ use tokio::{
     sync::oneshot::{Receiver, Sender},
 };
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub enum Validation {
-    #[default]
-    ExpectNone,
-    Key([u8; 16]),
+    Immediate(Option<[u8; 16]>),
     Delayed(Receiver<[u8; 16]>, Sender<Result<(), ReadError>>),
 }
 impl Validation {
@@ -25,14 +23,6 @@ impl Validation {
                 .expect("validation side channel closed");
             message_is_okay
         })
-    }
-}
-impl From<Option<[u8; 16]>> for Validation {
-    fn from(value: Option<[u8; 16]>) -> Self {
-        match value {
-            Some(key) => Self::Key(key),
-            None => Self::ExpectNone,
-        }
     }
 }
 

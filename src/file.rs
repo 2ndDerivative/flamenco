@@ -64,7 +64,7 @@ impl FileHandle {
 
         let (header, body) = session
             .connection
-            .signup_message(header, &request_body, key, false, Validation::from(key))
+            .signup_message(header, &request_body, false, Validation::Immediate(key))
             .await
             .map_err(|e| match e {
                 SignupMessageError::Read(read_error) => match read_error {
@@ -128,9 +128,8 @@ impl FileHandle {
                     id: self.id,
                     minimum_count,
                 },
-                key,
                 true,
-                Validation::from(key),
+                Validation::Immediate(key),
             )
             .await
         {
@@ -178,9 +177,8 @@ impl FileHandle {
             .signup_message(
                 header,
                 &CloseRequest { id },
-                session_key,
                 false,
-                Validation::from(session_key),
+                Validation::Immediate(session_key),
             )
             .await
             .unwrap();

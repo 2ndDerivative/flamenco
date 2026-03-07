@@ -47,9 +47,11 @@ pub async fn read_202_message<R: AsyncRead + Unpin>(
     let is_signed = header.flags & FLAG_SIGNED != 0;
     let arced = Arc::new(header);
     match validation {
-        Validation::Key(key) => validate_to_error(&arced, &key, &mut header_bytes, &message_body)
-            .map(|()| (arced, message_body)),
-        Validation::ExpectNone if !is_signed && arced.signature == [0u8; 16] => {
+        Validation::Immediate(Some(key)) => {
+            validate_to_error(&arced, &key, &mut header_bytes, &message_body)
+                .map(|()| (arced, message_body))
+        }
+        Validation::Immediate(None) if !is_signed && arced.signature == [0u8; 16] => {
             Ok((arced, message_body))
         }
         Validation::Delayed(incoming_key, outgoing_ok) => {
@@ -68,7 +70,7 @@ pub async fn read_202_message<R: AsyncRead + Unpin>(
             });
             Ok((arced, message_body))
         }
-        Validation::ExpectNone => Err(ReadError::InvalidlySignedMessage),
+        Validation::Immediate(None) => Err(ReadError::InvalidlySignedMessage),
     }
 }
 
