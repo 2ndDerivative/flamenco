@@ -47,9 +47,6 @@ impl Session202 {
     pub(crate) fn session_key(&self) -> &[u8; 16] {
         &self.session_key
     }
-    pub fn close(self) {
-        drop(self);
-    }
     pub async fn new(
         connection: Arc<Connection>,
         cred: &Credentials<Outbound>,
@@ -148,29 +145,22 @@ impl Session202 {
     ) -> Result<Arc<TreeConnection>, TreeConnectError> {
         TreeConnection::new(self, share_path).await
     }
-}
-impl Drop for Session202 {
-    fn drop(&mut self) {
-        let connection = self.connection.clone();
-        let session_id = self.id;
-        let requires_signing = self.requires_signing();
-        let session_key = self.session_key;
-        tokio::spawn(async move {
-            let logoff_header = SyncHeader202Outgoing {
-                command: Command202::Logoff,
-                credits: 1,
-                flags: 0,
-                next_command: None,
-                message_id: 0,
-                tree_id: 0,
-                session_id: Some(session_id),
-            };
-            let key = requires_signing.then_some(session_key);
-            let _ = connection
-                .signup_message(logoff_header, &LogoffRequest, false, key)
-                .await;
-            connection.remove_session(session_id).await;
-        });
+    pub async fn logoff(self) {
+        let logoff_header = SyncHeader202Outgoing {
+            command: Command202::Logoff,
+            credits: 1,
+            flags: 0,
+            next_command: None,
+            message_id: 0,
+            tree_id: 0,
+            session_id: Some(self.id),
+        };
+        let key = self.requires_signing().then_some(self.session_key);
+        let _ = self
+            .connection
+            .signup_message(logoff_header, &LogoffRequest, false, key)
+            .await;
+        self.connection.remove_session(self.id).await;
     }
 }
 

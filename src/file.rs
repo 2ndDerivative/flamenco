@@ -183,12 +183,6 @@ impl FileHandle {
         self.send_close().await
     }
 }
-impl Drop for FileHandle {
-    fn drop(&mut self) {
-        let fut = Self::send_close_raw(self.tree_connection.clone(), self.id);
-        tokio::spawn(fut);
-    }
-}
 impl AsyncRead for FileHandle {
     fn poll_read(
         mut self: Pin<&mut Self>,

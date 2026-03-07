@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use flamenco::{client::Client202, session::Session202, tree::TreeConnection};
 use kenobi::cred::Credentials;
 use tokio::io::AsyncReadExt;
@@ -13,15 +15,18 @@ async fn main() {
     let credentials = Credentials::new(own_spn.as_deref()).unwrap();
     let server_copy = server.clone();
     let con = client.connect(server_copy).await.unwrap();
-    let other_session = Session202::new(con, &credentials, target_spn.as_deref())
+    let session = Session202::new(con, &credentials, target_spn.as_deref())
         .await
         .unwrap();
-    let other_tree = TreeConnection::new(other_session, &share_path)
+    let tree = TreeConnection::new(session.clone(), &share_path)
         .await
         .unwrap();
-    let mut file2 = other_tree.open_file(&file_path).await.unwrap();
+    let mut file = tree.clone().open_file(&file_path).await.unwrap();
     eprintln!("Opened file");
     let mut s = String::new();
-    file2.read_to_string(&mut s).await.unwrap();
+    file.read_to_string(&mut s).await.unwrap();
+    file.close().await.unwrap();
+    Arc::into_inner(tree).unwrap().disconnect().await;
+    Arc::into_inner(session).unwrap().logoff().await;
     println!("Read file: {s}");
 }

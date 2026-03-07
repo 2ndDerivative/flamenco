@@ -54,8 +54,18 @@ impl TreeConnection {
         };
         Ok(Arc::new(tree))
     }
-    pub fn disconnect(self) {
-        drop(self)
+    pub async fn disconnect(self) {
+        let session = self.session.clone();
+        let key = session.requires_signing().then_some(*session.session_key());
+        let header = SyncHeader202Outgoing::from_tree_con(&self, Command202::TreeDisconnect);
+        let Ok((_header, body)) = session
+            .connection
+            .signup_message(header, &TreeDisconnectRequest, false, key)
+            .await
+        else {
+            return;
+        };
+        let _ = TreeDisconnectResponse::read_from(&mut body.as_ref()).await;
     }
     pub(crate) fn session(&self) -> &Session202 {
         self.session.borrow()
@@ -65,23 +75,6 @@ impl TreeConnection {
     }
     pub async fn open_file(self: Arc<Self>, path: &str) -> Result<FileHandle, OpenError> {
         FileHandle::new(self, path).await
-    }
-}
-impl Drop for TreeConnection {
-    fn drop(&mut self) {
-        let session = self.session.clone();
-        let key = session.requires_signing().then_some(*session.session_key());
-        let header = SyncHeader202Outgoing::from_tree_con(self, Command202::TreeDisconnect);
-        tokio::spawn(async move {
-            let Ok((_header, body)) = session
-                .connection
-                .signup_message(header, &TreeDisconnectRequest, false, key)
-                .await
-            else {
-                return;
-            };
-            let _ = TreeDisconnectResponse::read_from(&mut body.as_ref()).await;
-        });
     }
 }
 
