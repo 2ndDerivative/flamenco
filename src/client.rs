@@ -10,7 +10,7 @@ use std::{
 };
 use tokio::{
     net::{TcpStream, ToSocketAddrs},
-    sync::{Mutex, RwLock, oneshot::Sender},
+    sync::{Mutex, RwLock},
 };
 
 use kenobi::cred::{Credentials, Outbound};
@@ -57,7 +57,7 @@ impl Client202 {
     }
 }
 
-type OutstandingRequests = HashMap<u64, Sender<(SyncHeader202Incoming, Box<[u8]>)>>;
+type OutstandingRequests = HashMap<u64, ()>;
 #[derive(Debug)]
 pub struct Connection {
     pub(crate) client: Arc<Client202>,
@@ -83,7 +83,9 @@ impl Connection {
         incoming_validation: Validation,
     ) -> Result<(Arc<SyncHeader202Incoming>, Arc<[u8]>), SignupMessageError> {
         let mut connection = self.connection.lock().await;
+        let mut handle = self.outstanding_requests.write().await;
         Self::signup_message_raw(
+            handle.deref_mut(),
             connection.deref_mut(),
             &self.message_id,
             header,
@@ -131,7 +133,9 @@ impl Connection {
             security_mode: SecurityMode::None,
         };
         let message_id = 0.into();
+        let mut pending_requests = HashMap::new();
         let (header, body) = Self::signup_message_raw(
+            &mut pending_requests,
             &mut tcp,
             &message_id,
             neg_header,
@@ -166,7 +170,7 @@ impl Connection {
         Ok(Connection {
             client,
             message_id,
-            outstanding_requests: RwLock::default(),
+            outstanding_requests: RwLock::new(pending_requests),
             connection: Mutex::new(tcp),
             max_transaction_size: neg_resp.max_transact_size,
             max_read_size: neg_resp.max_read_size,
@@ -176,6 +180,7 @@ impl Connection {
         .into())
     }
     async fn signup_message_raw(
+        pending_requests: &mut HashMap<u64, ()>,
         tcp: &mut TcpStream,
         id: &AtomicU64,
         mut header: SyncHeader202Outgoing,
@@ -183,17 +188,24 @@ impl Connection {
         add_null: bool,
         incoming_validation: Validation,
     ) -> Result<(Arc<SyncHeader202Incoming>, Arc<[u8]>), SignupMessageError> {
-        header.message_id = id.fetch_add(1, Ordering::Relaxed);
+        let next_message_id = id.fetch_add(1, Ordering::Relaxed);
+        header.message_id = next_message_id;
         let sign_with_key = match incoming_validation {
             Validation::Immediate(k) => k,
             Validation::Delayed(_, _) => None,
         };
-        message::write_202_message(tcp, sign_with_key, header, msg, add_null)
+        pending_requests.insert(next_message_id, ());
+        let result = match message::write_202_message(tcp, sign_with_key, header, msg, add_null)
             .await
-            .map_err(SignupMessageError::Write)?;
-        message::read_202_message(tcp, incoming_validation)
-            .await
-            .map_err(SignupMessageError::Read)
+            .map_err(SignupMessageError::Write)
+        {
+            Ok(()) => message::read_202_message(tcp, incoming_validation)
+                .await
+                .map_err(SignupMessageError::Read),
+            Err(e) => Err(e),
+        };
+        pending_requests.remove(&next_message_id);
+        result
     }
 }
 
