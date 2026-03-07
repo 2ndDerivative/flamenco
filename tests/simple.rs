@@ -22,6 +22,6 @@ async fn main() {
     let mut file2 = other_tree.open_file(&file_path).await.unwrap();
     eprintln!("Opened file");
     let mut s = String::new();
-    dbg!(file2.read_to_string(&mut s).await).unwrap();
+    file2.read_to_string(&mut s).await.unwrap();
     println!("Read file: {s}");
 }

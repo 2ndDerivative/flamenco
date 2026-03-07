@@ -245,10 +245,6 @@ impl Connection {
                         eprintln!("Bad signature on message");
                         return;
                     };
-                    eprintln!(
-                        "Incoming Message {} ({:?}) verified successfully",
-                        header.message_id, header.command
-                    );
                 } else {
                     eprintln!("Session closed");
                     continue;
@@ -259,7 +255,6 @@ impl Connection {
                     eprintln!("Message request not found");
                     continue;
                 };
-                eprintln!("Dispatching message {message_id}");
                 if message_sender.send((header, body)).is_err() {
                     eprintln!("Message receiver for {message_id} closed early");
                 };

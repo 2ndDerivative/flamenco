@@ -23,7 +23,7 @@ use crate::{
 mod close;
 mod read;
 
-#[derive(Debug)]
+type ReadFuture = Pin<Box<dyn Future<Output = Result<Box<[u8]>, ReadFileError>> + Send + 'static>>;
 pub struct FileHandle {
     tree_connection: Arc<TreeConnection>,
     id: FileId,
@@ -35,6 +35,23 @@ pub struct FileHandle {
     last_access_time: u64,
     last_write_time: u64,
     change_time: u64,
+    future: Option<ReadFuture>,
+}
+impl std::fmt::Debug for FileHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileHandle")
+            .field("tree_connection", &self.tree_connection)
+            .field("id", &self.id)
+            .field("oplock_level", &self.oplock_level)
+            .field("offset", &self.offset)
+            .field("allocation_size", &self.allocation_size)
+            .field("end_of_file", &self.end_of_file)
+            .field("creation_time", &self.creation_time)
+            .field("last_access_time", &self.last_access_time)
+            .field("last_write_time", &self.last_write_time)
+            .field("change_time", &self.change_time)
+            .finish()
+    }
 }
 impl FileHandle {
     pub(crate) async fn new(
@@ -95,15 +112,18 @@ impl FileHandle {
             last_access_time,
             last_write_time,
             change_time,
+            future: None,
         })
     }
     pub async fn read_raw(
-        &mut self,
+        tree_connection: Arc<TreeConnection>,
+        id: FileId,
+        offset: u64,
         length: u32,
         minimum_count: u32,
     ) -> Result<Box<[u8]>, ReadFileError> {
-        let header = SyncHeader202Outgoing::from_tree_con(&self.tree_connection, Command202::Read);
-        let session = self.tree_connection.session();
+        let header = SyncHeader202Outgoing::from_tree_con(&tree_connection, Command202::Read);
+        let session = tree_connection.session();
         let key = session
             .requires_signing()
             .then_some(session.session_key())
@@ -114,8 +134,8 @@ impl FileHandle {
                 header,
                 &ReadRequest {
                     length,
-                    offset: self.offset,
-                    id: self.id,
+                    offset,
+                    id,
                     minimum_count,
                 },
                 true,
@@ -126,7 +146,6 @@ impl FileHandle {
                 WriteError::Connection(error) => ReadFileError::Io(error),
                 WriteError::MessageTooLong => ReadFileError::InvalidMessage,
             })?;
-        eprintln!("Received response");
         if let Some(code) = NonZero::new(header.status) {
             return Err(ServerError::handle_error_body(code, &body));
         }
@@ -149,7 +168,6 @@ impl FileHandle {
             .requires_signing()
             .then_some(session.session_key())
             .copied();
-        eprintln!("Sending close request");
         let (header, body) = session
             .connection
             .signup_message(header, &CloseRequest { id }, false, session_key)
@@ -167,7 +185,6 @@ impl FileHandle {
 }
 impl Drop for FileHandle {
     fn drop(&mut self) {
-        eprintln!("Dropping file handle");
         let fut = Self::send_close_raw(self.tree_connection.clone(), self.id);
         tokio::spawn(fut);
     }
@@ -182,28 +199,34 @@ impl AsyncRead for FileHandle {
         if until_end == 0 {
             return Poll::Ready(Ok(()));
         }
-        let fut = async move {
-            let max_protocol = self.tree_connection.session().connection.max_read_size() as u64;
-            let max_wanted = buf.remaining() as u64;
-            let to_request = until_end.min(max_protocol).min(max_wanted) as u32;
-            if to_request == 0 {
-                return Ok(());
-            }
-
-            match self.read_raw(to_request, 0).await {
-                Ok(outbuf) => {
-                    assert!(outbuf.len() <= to_request as usize);
-                    self.offset += outbuf.len() as u64;
-                    buf.put_slice(&outbuf);
-                    Ok(())
-                }
-                Err(rd) => Err(rd.collapse_to_io_error()),
-            }
-        };
-        tokio::pin!(fut);
-        match fut.poll(cx) {
-            Poll::Ready(res) => Poll::Ready(res),
+        let max_protocol = self.tree_connection.session().connection.max_read_size() as u64;
+        let max_wanted = buf.remaining() as u64;
+        let to_request = until_end.min(max_protocol).min(max_wanted) as u32;
+        if to_request == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        let tree = self.tree_connection.clone();
+        let id = self.id;
+        let offset = self.offset;
+        let fut = self.future.get_or_insert_with(|| {
+            let fut = async move { Self::read_raw(tree, id, offset, to_request, 0).await };
+            Box::pin(fut)
+        });
+        match fut.as_mut().poll(cx) {
             Poll::Pending => Poll::Pending,
+            Poll::Ready(res) => {
+                self.future = None;
+                match res {
+                    Ok(outbuf) => {
+                        assert!(outbuf.len() <= to_request as usize);
+                        let read_len = outbuf.len() as u64;
+                        self.offset += read_len;
+                        buf.put_slice(&outbuf);
+                        Poll::Ready(Ok(()))
+                    }
+                    Err(rd) => Poll::Ready(Err(rd.collapse_to_io_error())),
+                }
+            }
         }
     }
 }
