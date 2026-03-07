@@ -18,13 +18,13 @@ use kenobi::cred::{Credentials, Outbound};
 use crate::{
     error::{ErrorResponse2, ServerError},
     header::{Command202, SyncHeader202Incoming, SyncHeader202Outgoing},
-    message::{
-        MessageBody, ReadError, Validation, WriteError, read_202_message, write_202_message,
-    },
+    message::{MessageBody, ReadError, Validation, WriteError},
     negotiate::{Dialect, NegotiateError, NegotiateRequest202, NegotiateResponse},
     session::{Session202, SessionSetupError},
     sign::SecurityMode,
 };
+
+mod message;
 
 const MINIMUM_TRANSACT_SIZE: u32 = 65536;
 
@@ -77,20 +77,23 @@ pub(crate) enum SignupMessageError {
 impl Connection {
     pub(crate) async fn signup_message(
         &self,
-        mut header: SyncHeader202Outgoing,
+        header: SyncHeader202Outgoing,
         msg: &impl MessageBody,
         sign_with_key: Option<[u8; 16]>,
         add_null: bool,
         incoming_validation: Validation,
     ) -> Result<(Arc<SyncHeader202Incoming>, Arc<[u8]>), SignupMessageError> {
         let mut connection = self.connection.lock().await;
-        header.message_id = self.message_id.fetch_add(1, Ordering::Relaxed);
-        write_202_message(connection.deref_mut(), sign_with_key, header, msg, add_null)
-            .await
-            .map_err(SignupMessageError::Write)?;
-        read_202_message(connection.deref_mut(), incoming_validation)
-            .await
-            .map_err(SignupMessageError::Read)
+        Self::signup_message_raw(
+            connection.deref_mut(),
+            &self.message_id,
+            header,
+            msg,
+            sign_with_key,
+            add_null,
+            incoming_validation,
+        )
+        .await
     }
     pub fn max_transaction_size(&self) -> u32 {
         self.max_transaction_size
@@ -129,9 +132,21 @@ impl Connection {
             capabilities: 0,
             security_mode: SecurityMode::None,
         };
-        write_202_message(&mut tcp, None, neg_header, &neg_req, false).await?;
-
-        let (header, body) = read_202_message(&mut tcp, Validation::ExpectNone).await?;
+        let message_id = 0.into();
+        let (header, body) = Self::signup_message_raw(
+            &mut tcp,
+            &message_id,
+            neg_header,
+            &neg_req,
+            None,
+            false,
+            Validation::ExpectNone,
+        )
+        .await
+        .map_err(|e| match e {
+            SignupMessageError::Read(read_error) => ConnectError::from(read_error),
+            SignupMessageError::Write(write_error) => ConnectError::from(write_error),
+        })?;
         if let Some(code) = NonZero::new(header.status) {
             return Err(ConnectError::handle_error_body(code, &body));
         }
@@ -151,10 +166,9 @@ impl Connection {
             Dialect::Wildcard => unimplemented!(),
             _ => return Err(ConnectError::ServerChoseUnsupportedDialect),
         }
-
         Ok(Connection {
             client,
-            message_id: 1.into(),
+            message_id,
             outstanding_requests: RwLock::default(),
             connection: Mutex::new(tcp),
             max_transaction_size: neg_resp.max_transact_size,
@@ -163,6 +177,23 @@ impl Connection {
             server_requires_signing,
         }
         .into())
+    }
+    async fn signup_message_raw(
+        tcp: &mut TcpStream,
+        id: &AtomicU64,
+        mut header: SyncHeader202Outgoing,
+        msg: &impl MessageBody,
+        sign_with_key: Option<[u8; 16]>,
+        add_null: bool,
+        incoming_validation: Validation,
+    ) -> Result<(Arc<SyncHeader202Incoming>, Arc<[u8]>), SignupMessageError> {
+        header.message_id = id.fetch_add(1, Ordering::Relaxed);
+        message::write_202_message(tcp, sign_with_key, header, msg, add_null)
+            .await
+            .map_err(SignupMessageError::Write)?;
+        message::read_202_message(tcp, incoming_validation)
+            .await
+            .map_err(SignupMessageError::Read)
     }
 }
 
