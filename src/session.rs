@@ -12,10 +12,10 @@ use kenobi::{
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::{
-    client::{Connection, GuestPolicy, SignupMessageError},
+    client::{Connection, GuestPolicy},
     error::{ErrorResponse2, ServerError},
     header::{Command202, SyncHeader202Outgoing},
-    message::{MessageBody, ReadError as MsgReadError, Validation, WriteError as MsgWriteError},
+    message::{MessageBody, ReadError as MsgReadError, WriteError as MsgWriteError},
     sign::SecurityMode,
     tree::{TreeConnectError, TreeConnection},
 };
@@ -24,7 +24,7 @@ const ERROR_MORE_PROCESSING_REQUIRED: u32 = 0xC0000016;
 
 pub struct Session202 {
     session_key: [u8; 16],
-    pub(crate) id: u64,
+    pub(crate) id: NonZero<u64>,
     pub(crate) connection: Arc<Connection>,
     flags: SessionFlags,
     requires_signing: bool,
@@ -61,7 +61,7 @@ impl Session202 {
             StepOut::Pending(pending) => pending,
             StepOut::Finished(_c) => unreachable!(),
         };
-        let mut session_id = 0;
+        let mut session_id = None;
         loop {
             let client = &connection.client;
             let header = SyncHeader202Outgoing {
@@ -83,14 +83,9 @@ impl Session202 {
                 previous_session_id: 0,
                 buffer: auth_context.next_token(),
             };
-            let (validation, validate) = Validation::setup_delayed();
-            let (_, header, body) = connection
-                .signup_message(header, &body, false, validation)
-                .await
-                .map_err(|su| match su {
-                    SignupMessageError::Read(read_error) => SessionSetupError::from(read_error),
-                    SignupMessageError::Write(write_error) => write_error.into(),
-                })?;
+            let (header, body) = connection
+                .signup_message(header, &body, false, None)
+                .await?;
             // Lookup session ID
             if let Some(code) = NonZero::new(header.status)
                 && code.get() != ERROR_MORE_PROCESSING_REQUIRED
@@ -107,9 +102,6 @@ impl Session202 {
                         .session_key()
                         .first_chunk::<16>()
                         .ok_or(SessionSetupError::SessionKeyTooShort)?;
-                    validate(session_key)
-                        .await
-                        .expect("side task was dropped")?;
                     if flags == SessionFlags::Guest {
                         match client.guest_policy {
                             GuestPolicy::Disallowed => {
@@ -128,17 +120,25 @@ impl Session202 {
                         SessionFlags::Guest => client.requires_signing,
                         SessionFlags::Anonymous => false,
                     };
+                    let Some(id) = NonZero::new(header.session_id) else {
+                        return Err(SessionSetupError::InvalidMessage);
+                    };
                     let session = Session202 {
                         flags,
                         requires_signing,
-                        id: header.session_id,
+                        id,
                         session_key,
-                        connection,
+                        connection: connection.clone(),
                     };
-                    return Ok(Arc::new(session));
+                    let as_arc = Arc::new(session);
+                    connection
+                        .signup_session(id, Arc::downgrade(&as_arc))
+                        .await
+                        .unwrap();
+                    return Ok(as_arc);
                 }
             };
-            session_id = header.session_id;
+            session_id = NonZero::new(header.session_id);
         }
     }
     pub async fn tree_connect(
@@ -162,17 +162,13 @@ impl Drop for Session202 {
                 next_command: None,
                 message_id: 0,
                 tree_id: 0,
-                session_id,
+                session_id: Some(session_id),
             };
             let key = requires_signing.then_some(session_key);
             let _ = connection
-                .signup_message(
-                    logoff_header,
-                    &LogoffRequest,
-                    false,
-                    Validation::Immediate(key),
-                )
+                .signup_message(logoff_header, &LogoffRequest, false, key)
                 .await;
+            connection.remove_session(session_id).await;
         });
     }
 }

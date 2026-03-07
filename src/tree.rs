@@ -11,7 +11,7 @@ use crate::{
     error::{ErrorResponse2, ServerError},
     file::{FileHandle, OpenError},
     header::{Command202, SyncHeader202Outgoing},
-    message::{MessageBody, ReadError as MsgReadError, Validation, WriteError as MsgWriteError},
+    message::{MessageBody, ReadError as MsgReadError, WriteError as MsgWriteError},
     session::Session202,
     share_name::{InvalidShareName, ShareName},
 };
@@ -37,23 +37,10 @@ impl TreeConnection {
         if let Err(e) = parse_share_path(path) {
             return Err(TreeConnectError::InvalidPath(e));
         };
-        let (_, header, msg) = session
+        let (header, msg) = session
             .connection
-            .signup_message(
-                tc_header,
-                &TreeConnectRequest(path),
-                false,
-                Validation::Immediate(session_key),
-            )
-            .await
-            .map_err(|e| match e {
-                crate::client::SignupMessageError::Read(read_error) => {
-                    TreeConnectError::from(read_error)
-                }
-                crate::client::SignupMessageError::Write(write_error) => {
-                    TreeConnectError::from(write_error)
-                }
-            })?;
+            .signup_message(tc_header, &TreeConnectRequest(path), false, session_key)
+            .await?;
         if let Some(code) = NonZero::new(header.status) {
             return Err(ServerError::handle_error_body(code, &msg));
         }
@@ -86,14 +73,9 @@ impl Drop for TreeConnection {
         let key = session.requires_signing().then_some(*session.session_key());
         let header = SyncHeader202Outgoing::from_tree_con(self, Command202::TreeDisconnect);
         tokio::spawn(async move {
-            let Ok((_, _header, body)) = session
+            let Ok((_header, body)) = session
                 .connection
-                .signup_message(
-                    header,
-                    &TreeDisconnectRequest,
-                    false,
-                    Validation::Immediate(key),
-                )
+                .signup_message(header, &TreeDisconnectRequest, false, key)
                 .await
             else {
                 return;

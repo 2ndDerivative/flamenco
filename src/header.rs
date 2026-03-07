@@ -15,7 +15,7 @@ pub struct SyncHeader202Outgoing {
     pub next_command: Option<NonZero<u32>>,
     pub message_id: u64,
     pub tree_id: u32,
-    pub session_id: u64,
+    pub session_id: Option<NonZero<u64>>,
 }
 impl SyncHeader202Outgoing {
     pub fn from_session(session: &Session202, command: Command202) -> Self {
@@ -30,7 +30,7 @@ impl SyncHeader202Outgoing {
             next_command: None,
             message_id: 0,
             tree_id: 0,
-            session_id: session.id,
+            session_id: Some(session.id),
         }
     }
     pub fn from_tree_con(tree_con: &TreeConnection, command: Command202) -> Self {
@@ -49,10 +49,10 @@ impl SyncHeader202Outgoing {
         bytes[12..14].copy_from_slice(&self.command.as_u16().to_le_bytes());
         bytes[14..16].copy_from_slice(&1u16.to_le_bytes());
         bytes[16..20].copy_from_slice(&self.flags.to_le_bytes());
-        bytes[20..24].copy_from_slice(&self.next_command.map_or(0, |n| n.get()).to_le_bytes());
+        bytes[20..24].copy_from_slice(&self.next_command.map_or(0, NonZero::get).to_le_bytes());
         bytes[24..32].copy_from_slice(&self.message_id.to_le_bytes());
         bytes[36..40].copy_from_slice(&self.tree_id.to_le_bytes());
-        bytes[40..48].copy_from_slice(&self.session_id.to_le_bytes());
+        bytes[40..48].copy_from_slice(&self.session_id.map_or(0, NonZero::get).to_le_bytes());
         bytes
     }
 }

@@ -10,14 +10,13 @@ use std::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 use crate::{
-    client::SignupMessageError,
     error::{ErrorResponse2, ServerError},
     file::{
         close::{CloseRequest, CloseResponse},
         read::{ReadFileError, ReadRequest, ReadResponse, ReadResponseError},
     },
     header::{Command202, SyncHeader202Outgoing},
-    message::{MessageBody, ReadError as MsgReadError, Validation, WriteError},
+    message::{MessageBody, WriteError},
     tree::TreeConnection,
 };
 
@@ -62,22 +61,13 @@ impl FileHandle {
             .then_some(session.session_key())
             .copied();
 
-        let (_, header, body) = session
+        let (header, body) = session
             .connection
-            .signup_message(header, &request_body, false, Validation::Immediate(key))
+            .signup_message(header, &request_body, false, key)
             .await
             .map_err(|e| match e {
-                SignupMessageError::Read(read_error) => match read_error {
-                    MsgReadError::NetBIOS
-                    | MsgReadError::NotSigned
-                    | MsgReadError::InvalidSignature
-                    | MsgReadError::InvalidlySignedMessage => OpenError::InvalidMessage,
-                    MsgReadError::Connection(error) => OpenError::Io(error),
-                },
-                SignupMessageError::Write(write_error) => match write_error {
-                    WriteError::Connection(error) => OpenError::Io(error),
-                    WriteError::MessageTooLong => OpenError::InvalidMessage,
-                },
+                WriteError::Connection(error) => OpenError::Io(error),
+                WriteError::MessageTooLong => OpenError::InvalidMessage,
             })?;
         if let Some(code) = NonZero::new(header.status) {
             return Err(ServerError::handle_error_body(code, &body));
@@ -118,7 +108,7 @@ impl FileHandle {
             .requires_signing()
             .then_some(session.session_key())
             .copied();
-        let (_, header, body) = match session
+        let (header, body) = session
             .connection
             .signup_message(
                 header,
@@ -129,27 +119,14 @@ impl FileHandle {
                     minimum_count,
                 },
                 true,
-                Validation::Immediate(key),
+                key,
             )
             .await
-        {
-            Ok(ok) => ok,
-            Err(SignupMessageError::Read(r)) => {
-                return Err(match r {
-                    MsgReadError::NetBIOS
-                    | MsgReadError::NotSigned
-                    | MsgReadError::InvalidSignature
-                    | MsgReadError::InvalidlySignedMessage => ReadFileError::InvalidMessage,
-                    MsgReadError::Connection(io) => ReadFileError::Io(io),
-                });
-            }
-            Err(SignupMessageError::Write(w)) => {
-                return Err(match w {
-                    WriteError::Connection(error) => ReadFileError::Io(error),
-                    WriteError::MessageTooLong => ReadFileError::InvalidMessage,
-                });
-            }
-        };
+            .map_err(|w| match w {
+                WriteError::Connection(error) => ReadFileError::Io(error),
+                WriteError::MessageTooLong => ReadFileError::InvalidMessage,
+            })?;
+        eprintln!("Received response");
         if let Some(code) = NonZero::new(header.status) {
             return Err(ServerError::handle_error_body(code, &body));
         }
@@ -172,14 +149,10 @@ impl FileHandle {
             .requires_signing()
             .then_some(session.session_key())
             .copied();
-        let (_, header, body) = session
+        eprintln!("Sending close request");
+        let (header, body) = session
             .connection
-            .signup_message(
-                header,
-                &CloseRequest { id },
-                false,
-                Validation::Immediate(session_key),
-            )
+            .signup_message(header, &CloseRequest { id }, false, session_key)
             .await
             .unwrap();
         if let Some(code) = NonZero::new(header.status) {
@@ -194,6 +167,7 @@ impl FileHandle {
 }
 impl Drop for FileHandle {
     fn drop(&mut self) {
+        eprintln!("Dropping file handle");
         let fut = Self::send_close_raw(self.tree_connection.clone(), self.id);
         tokio::spawn(fut);
     }

@@ -4,7 +4,7 @@ use std::{
     num::NonZero,
     ops::DerefMut,
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -13,10 +13,8 @@ use tokio::{
         TcpStream, ToSocketAddrs,
         tcp::{OwnedReadHalf, OwnedWriteHalf},
     },
-    sync::{
-        Mutex, RwLock,
-        oneshot::{Receiver, Sender},
-    },
+    sync::{Mutex, RwLock, oneshot::Sender},
+    task::JoinHandle,
 };
 
 use kenobi::cred::{Credentials, Outbound};
@@ -24,7 +22,7 @@ use kenobi::cred::{Credentials, Outbound};
 use crate::{
     error::{ErrorResponse2, ServerError},
     header::{Command202, SyncHeader202Incoming, SyncHeader202Outgoing},
-    message::{MessageBody, ReadError, Validation, WriteError},
+    message::{MessageBody, ReadError, WriteError},
     negotiate::{Dialect, NegotiateError, NegotiateRequest202, NegotiateResponse},
     session::{Session202, SessionSetupError},
     sign::SecurityMode,
@@ -63,23 +61,21 @@ impl Client202 {
     }
 }
 
-type OutstandingRequests = HashMap<u64, Sender<(Arc<[u8]>, Arc<SyncHeader202Incoming>, Arc<[u8]>)>>;
+type OutstandingRequests = HashMap<u64, Sender<(Arc<SyncHeader202Incoming>, Arc<[u8]>)>>;
+type OpenSessions = HashMap<NonZero<u64>, Weak<Session202>>;
+
 #[derive(Debug)]
 pub struct Connection {
     pub(crate) client: Arc<Client202>,
-    outstanding_requests: RwLock<OutstandingRequests>,
+    outstanding_requests: Arc<Mutex<OutstandingRequests>>,
+    open_sessions: Arc<RwLock<OpenSessions>>,
     message_id: AtomicU64,
     write_tcp: Mutex<OwnedWriteHalf>,
-    read_tcp: Mutex<OwnedReadHalf>,
     max_transaction_size: u32,
     max_read_size: u32,
     max_write_size: u32,
     server_requires_signing: bool,
-}
-#[derive(Debug)]
-pub(crate) enum SignupMessageError {
-    Read(crate::message::ReadError),
-    Write(crate::message::WriteError),
+    drive_handle: JoinHandle<()>,
 }
 impl Connection {
     pub(crate) async fn signup_message(
@@ -87,23 +83,33 @@ impl Connection {
         header: SyncHeader202Outgoing,
         msg: &impl MessageBody,
         add_null: bool,
-        incoming_validation: Validation,
-    ) -> Result<(Arc<[u8]>, Arc<SyncHeader202Incoming>, Arc<[u8]>), SignupMessageError> {
-        let (mut rtcp, mut wtcp) = tokio::join!(self.write_tcp.lock(), self.read_tcp.lock());
-        let mut handle = self.outstanding_requests.write().await;
-        Ok(Self::signup_message_raw(
-            handle.deref_mut(),
+        key: Option<[u8; 16]>,
+    ) -> Result<(Arc<SyncHeader202Incoming>, Arc<[u8]>), crate::message::WriteError> {
+        let mut wtcp = self.write_tcp.lock().await;
+        Self::signup_message_raw(
+            self.outstanding_requests.clone(),
             wtcp.deref_mut(),
-            rtcp.deref_mut(),
             &self.message_id,
             header,
             msg,
             add_null,
-            incoming_validation,
+            key,
         )
-        .await?
         .await
-        .unwrap())
+    }
+    pub(crate) async fn signup_session(
+        &self,
+        session_id: NonZero<u64>,
+        session: Weak<Session202>,
+    ) -> Result<(), ()> {
+        let mut map = self.open_sessions.write().await;
+        match map.insert(session_id, session) {
+            Some(_) => Err(()),
+            None => Ok(()),
+        }
+    }
+    pub(crate) async fn remove_session(&self, session_id: NonZero<u64>) {
+        self.open_sessions.write().await.remove(&session_id);
     }
     pub fn max_transaction_size(&self) -> u32 {
         self.max_transaction_size
@@ -128,7 +134,7 @@ impl Connection {
         client: Arc<Client202>,
         addr: impl ToSocketAddrs,
     ) -> Result<Arc<Connection>, ConnectError> {
-        let (mut rtcp, mut wtcp) = TcpStream::connect(addr).await?.into_split();
+        let (rtcp, mut wtcp) = TcpStream::connect(addr).await?.into_split();
         let neg_header = SyncHeader202Outgoing {
             command: Command202::Negotiate,
             credits: 1,
@@ -136,31 +142,30 @@ impl Connection {
             next_command: None,
             message_id: 0,
             tree_id: 0,
-            session_id: 0,
+            session_id: None,
         };
         let neg_req = NegotiateRequest202 {
             capabilities: 0,
             security_mode: SecurityMode::None,
         };
         let message_id = 0.into();
-        let mut pending_requests = HashMap::new();
-        let (_, header, body) = Self::signup_message_raw(
-            &mut pending_requests,
-            &mut rtcp,
+        let outstanding_requests: Arc<Mutex<OutstandingRequests>> = Arc::default();
+        let open_sessions: Arc<RwLock<OpenSessions>> = Arc::default();
+        let drive_handle = tokio::spawn(Self::drive(
+            open_sessions.clone(),
+            outstanding_requests.clone(),
+            rtcp,
+        ));
+        let (header, body) = Self::signup_message_raw(
+            outstanding_requests.clone(),
             &mut wtcp,
             &message_id,
             neg_header,
             &neg_req,
             false,
-            Validation::Immediate(None),
+            None,
         )
-        .await
-        .map_err(|e| match e {
-            SignupMessageError::Read(read_error) => ConnectError::from(read_error),
-            SignupMessageError::Write(write_error) => ConnectError::from(write_error),
-        })?
-        .await
-        .unwrap();
+        .await?;
         if let Some(code) = NonZero::new(header.status) {
             return Err(ConnectError::handle_error_body(code, &body));
         }
@@ -181,54 +186,102 @@ impl Connection {
             _ => return Err(ConnectError::ServerChoseUnsupportedDialect),
         }
         let write_tcp = Mutex::new(wtcp);
-        let read_tcp = Mutex::new(rtcp);
-        Ok(Connection {
+        let connection = Arc::new(Connection {
             client,
             message_id,
-            outstanding_requests: RwLock::new(pending_requests),
+            outstanding_requests,
+            open_sessions,
             write_tcp,
-            read_tcp,
             max_transaction_size: neg_resp.max_transact_size,
             max_read_size: neg_resp.max_read_size,
             max_write_size: neg_resp.max_write_size,
             server_requires_signing,
-        }
-        .into())
+            drive_handle,
+        });
+        Ok(connection)
     }
     #[allow(clippy::too_many_arguments)]
     async fn signup_message_raw(
-        pending_requests: &mut OutstandingRequests,
-        read_tcp: &mut OwnedReadHalf,
+        pending_requests: Arc<Mutex<OutstandingRequests>>,
         write_tcp: &mut OwnedWriteHalf,
         id: &AtomicU64,
         mut header: SyncHeader202Outgoing,
         msg: &impl MessageBody,
         add_null: bool,
-        incoming_validation: Validation,
-    ) -> Result<Receiver<(Arc<[u8]>, Arc<SyncHeader202Incoming>, Arc<[u8]>)>, SignupMessageError>
-    {
+        key: Option<[u8; 16]>,
+    ) -> Result<(Arc<SyncHeader202Incoming>, Arc<[u8]>), crate::message::WriteError> {
         let next_message_id = id.fetch_add(1, Ordering::Relaxed);
         header.message_id = next_message_id;
-        let sign_with_key = match incoming_validation {
-            Validation::Immediate(k) => k,
-            Validation::Delayed(_, _) => None,
-        };
         let (sx, rx) = tokio::sync::oneshot::channel();
-        pending_requests.insert(next_message_id, sx);
-        let result =
-            match message::write_202_message(write_tcp, sign_with_key, header, msg, add_null)
-                .await
-                .map_err(SignupMessageError::Write)
-            {
-                Ok(()) => message::read_202_message(read_tcp, incoming_validation)
+        pending_requests.lock().await.insert(next_message_id, sx);
+        message::write_202_message(write_tcp, key, header, msg, add_null).await?;
+        Ok(rx.await.expect("dropped sender?"))
+    }
+    async fn drive(
+        open_sessions: Arc<RwLock<OpenSessions>>,
+        outstanding_requests: Arc<Mutex<OutstandingRequests>>,
+        mut tcp: OwnedReadHalf,
+    ) {
+        loop {
+            let (key_sender, key_receiver) = tokio::sync::oneshot::channel();
+            let (header, body, validation) =
+                match message::read_202_message(&mut tcp, key_receiver).await {
+                    Ok(v) => v,
+                    Err(err) => {
+                        eprintln!("Error reading message: {err:?}");
+                        continue;
+                    }
+                };
+            let session = {
+                let lock = open_sessions.read().await;
+                NonZero::new(header.session_id).and_then(|id| lock.get(&id).cloned())
+            };
+            if let Some(maybe_session) = session {
+                if let Some(session) = maybe_session.upgrade() {
+                    key_sender
+                        .send(Some(*session.session_key()))
+                        .expect("validation side task removed");
+                    let Ok(()) = validation.await else {
+                        eprintln!("Bad signature on message");
+                        return;
+                    };
+                    eprintln!(
+                        "Incoming Message {} ({:?}) verified successfully",
+                        header.message_id, header.command
+                    );
+                } else {
+                    eprintln!("Session closed");
+                    continue;
+                }
+                let message_id = header.message_id;
+                let sender = outstanding_requests.lock().await.remove(&message_id);
+                let Some(message_sender) = sender else {
+                    eprintln!("Message request not found");
+                    continue;
+                };
+                eprintln!("Dispatching message {message_id}");
+                if message_sender.send((header, body)).is_err() {
+                    eprintln!("Message receiver for {message_id} closed early");
+                };
+            } else if matches!(
+                header.command,
+                Command202::Negotiate | Command202::SessionSetup
+            ) {
+                let message_sender = outstanding_requests
+                    .lock()
                     .await
-                    .map_err(SignupMessageError::Read),
-                Err(e) => Err(e),
-            }?;
-        if let Some(sender) = pending_requests.remove(&next_message_id) {
-            let _ = sender.send((Arc::default(), result.0, result.1));
+                    .remove(&header.message_id)
+                    .unwrap();
+                let _ = message_sender.send((header, body));
+            } else {
+                eprintln!("Logged in command with no session");
+            }
         }
-        Ok(rx)
+    }
+}
+impl Drop for Connection {
+    fn drop(&mut self) {
+        self.drive_handle.abort();
     }
 }
 

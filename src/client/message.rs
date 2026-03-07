@@ -5,20 +5,30 @@ use std::{
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    sync::oneshot::Receiver,
+};
 
 const STATUS_PENDING: u32 = 0x00000103;
 
 use crate::{
     header::{FLAG_SIGNED, SyncHeader202Incoming, SyncHeader202Outgoing},
-    message::{MessageBody, ReadError, Validation, WriteError},
+    message::{MessageBody, ReadError, WriteError},
 };
 
 /// Signature validation and netBIOS stuff should be happening here
 pub async fn read_202_message<R: AsyncRead + Unpin>(
     r: &mut R,
-    validation: Validation,
-) -> Result<(Arc<SyncHeader202Incoming>, Arc<[u8]>), ReadError> {
+    incoming_key: Receiver<Option<[u8; 16]>>,
+) -> Result<
+    (
+        Arc<SyncHeader202Incoming>,
+        Arc<[u8]>,
+        impl Future<Output = Result<(), ReadError>>,
+    ),
+    ReadError,
+> {
     let mut bios_size = [0u8; 4];
     r.read_exact(&mut bios_size)
         .await
@@ -43,35 +53,20 @@ pub async fn read_202_message<R: AsyncRead + Unpin>(
     r.read_exact(&mut message_body)
         .await
         .map_err(ReadError::Connection)?;
-    let message_body = Arc::from(message_body);
-    let is_signed = header.flags & FLAG_SIGNED != 0;
+    let message_body: Arc<[u8]> = Arc::from(message_body);
     let arced = Arc::new(header);
-    match validation {
-        Validation::Immediate(Some(key)) => {
-            validate_to_error(&arced, &key, &mut header_bytes, &message_body)
-                .map(|()| (arced, message_body))
+    let retained_body = message_body.clone();
+    let arced2 = arced.clone();
+    Ok((arced, message_body, async move {
+        if let Some(key) = incoming_key
+            .await
+            .expect("dropped promised validation handle!")
+        {
+            validate_to_error(&arced2, &key, &mut header_bytes, &retained_body)
+        } else {
+            Ok(())
         }
-        Validation::Immediate(None) if !is_signed && arced.signature == [0u8; 16] => {
-            Ok((arced, message_body))
-        }
-        Validation::Delayed(incoming_key, outgoing_ok) => {
-            let retained_body = message_body.clone();
-            let arced2 = arced.clone();
-            tokio::spawn(async move {
-                let _ = outgoing_ok.send(
-                    async move {
-                        let key = incoming_key
-                            .await
-                            .expect("dropped promised validation handle!");
-                        validate_to_error(&arced2, &key, &mut header_bytes, &retained_body)
-                    }
-                    .await,
-                );
-            });
-            Ok((arced, message_body))
-        }
-        Validation::Immediate(None) => Err(ReadError::InvalidlySignedMessage),
-    }
+    }))
 }
 
 fn validate_to_error(
