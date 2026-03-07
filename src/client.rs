@@ -9,7 +9,10 @@ use std::{
     },
 };
 use tokio::{
-    net::{TcpStream, ToSocketAddrs},
+    net::{
+        TcpStream, ToSocketAddrs,
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+    },
     sync::{Mutex, RwLock},
 };
 
@@ -63,7 +66,7 @@ pub struct Connection {
     pub(crate) client: Arc<Client202>,
     outstanding_requests: RwLock<OutstandingRequests>,
     message_id: AtomicU64,
-    connection: Mutex<TcpStream>,
+    connection: Mutex<(OwnedReadHalf, OwnedWriteHalf)>,
     max_transaction_size: u32,
     max_read_size: u32,
     max_write_size: u32,
@@ -84,9 +87,11 @@ impl Connection {
     ) -> Result<(Arc<SyncHeader202Incoming>, Arc<[u8]>), SignupMessageError> {
         let mut connection = self.connection.lock().await;
         let mut handle = self.outstanding_requests.write().await;
+        let (rtcp, wtcp) = connection.deref_mut();
         Self::signup_message_raw(
             handle.deref_mut(),
-            connection.deref_mut(),
+            rtcp,
+            wtcp,
             &self.message_id,
             header,
             msg,
@@ -118,7 +123,7 @@ impl Connection {
         client: Arc<Client202>,
         addr: impl ToSocketAddrs,
     ) -> Result<Arc<Connection>, ConnectError> {
-        let mut tcp = TcpStream::connect(addr).await?;
+        let (mut rtcp, mut wtcp) = TcpStream::connect(addr).await?.into_split();
         let neg_header = SyncHeader202Outgoing {
             command: Command202::Negotiate,
             credits: 1,
@@ -136,7 +141,8 @@ impl Connection {
         let mut pending_requests = HashMap::new();
         let (header, body) = Self::signup_message_raw(
             &mut pending_requests,
-            &mut tcp,
+            &mut rtcp,
+            &mut wtcp,
             &message_id,
             neg_header,
             &neg_req,
@@ -171,7 +177,7 @@ impl Connection {
             client,
             message_id,
             outstanding_requests: RwLock::new(pending_requests),
-            connection: Mutex::new(tcp),
+            connection: Mutex::new((rtcp, wtcp)),
             max_transaction_size: neg_resp.max_transact_size,
             max_read_size: neg_resp.max_read_size,
             max_write_size: neg_resp.max_write_size,
@@ -179,9 +185,11 @@ impl Connection {
         }
         .into())
     }
+    #[allow(clippy::too_many_arguments)]
     async fn signup_message_raw(
         pending_requests: &mut HashMap<u64, ()>,
-        tcp: &mut TcpStream,
+        read_tcp: &mut OwnedReadHalf,
+        write_tcp: &mut OwnedWriteHalf,
         id: &AtomicU64,
         mut header: SyncHeader202Outgoing,
         msg: &impl MessageBody,
@@ -195,15 +203,16 @@ impl Connection {
             Validation::Delayed(_, _) => None,
         };
         pending_requests.insert(next_message_id, ());
-        let result = match message::write_202_message(tcp, sign_with_key, header, msg, add_null)
-            .await
-            .map_err(SignupMessageError::Write)
-        {
-            Ok(()) => message::read_202_message(tcp, incoming_validation)
+        let result =
+            match message::write_202_message(write_tcp, sign_with_key, header, msg, add_null)
                 .await
-                .map_err(SignupMessageError::Read),
-            Err(e) => Err(e),
-        };
+                .map_err(SignupMessageError::Write)
+            {
+                Ok(()) => message::read_202_message(read_tcp, incoming_validation)
+                    .await
+                    .map_err(SignupMessageError::Read),
+                Err(e) => Err(e),
+            };
         pending_requests.remove(&next_message_id);
         result
     }
