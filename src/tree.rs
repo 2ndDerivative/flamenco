@@ -37,7 +37,7 @@ impl TreeConnection {
         if let Err(e) = parse_share_path(path) {
             return Err(TreeConnectError::InvalidPath(e));
         };
-        let (header, msg) = session
+        let (_, header, msg) = session
             .connection
             .signup_message(
                 tc_header,
@@ -86,7 +86,7 @@ impl Drop for TreeConnection {
         let key = session.requires_signing().then_some(*session.session_key());
         let header = SyncHeader202Outgoing::from_tree_con(self, Command202::TreeDisconnect);
         tokio::spawn(async move {
-            let Ok((_header, body)) = session
+            let Ok((_, _header, body)) = session
                 .connection
                 .signup_message(
                     header,

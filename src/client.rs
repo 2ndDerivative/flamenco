@@ -13,7 +13,10 @@ use tokio::{
         TcpStream, ToSocketAddrs,
         tcp::{OwnedReadHalf, OwnedWriteHalf},
     },
-    sync::{Mutex, RwLock},
+    sync::{
+        Mutex, RwLock,
+        oneshot::{Receiver, Sender},
+    },
 };
 
 use kenobi::cred::{Credentials, Outbound};
@@ -60,7 +63,7 @@ impl Client202 {
     }
 }
 
-type OutstandingRequests = HashMap<u64, ()>;
+type OutstandingRequests = HashMap<u64, Sender<(Arc<[u8]>, Arc<SyncHeader202Incoming>, Arc<[u8]>)>>;
 #[derive(Debug)]
 pub struct Connection {
     pub(crate) client: Arc<Client202>,
@@ -84,11 +87,11 @@ impl Connection {
         msg: &impl MessageBody,
         add_null: bool,
         incoming_validation: Validation,
-    ) -> Result<(Arc<SyncHeader202Incoming>, Arc<[u8]>), SignupMessageError> {
+    ) -> Result<(Arc<[u8]>, Arc<SyncHeader202Incoming>, Arc<[u8]>), SignupMessageError> {
         let mut connection = self.connection.lock().await;
         let mut handle = self.outstanding_requests.write().await;
         let (rtcp, wtcp) = connection.deref_mut();
-        Self::signup_message_raw(
+        Ok(Self::signup_message_raw(
             handle.deref_mut(),
             rtcp,
             wtcp,
@@ -98,7 +101,9 @@ impl Connection {
             add_null,
             incoming_validation,
         )
+        .await?
         .await
+        .unwrap())
     }
     pub fn max_transaction_size(&self) -> u32 {
         self.max_transaction_size
@@ -139,7 +144,7 @@ impl Connection {
         };
         let message_id = 0.into();
         let mut pending_requests = HashMap::new();
-        let (header, body) = Self::signup_message_raw(
+        let (_, header, body) = Self::signup_message_raw(
             &mut pending_requests,
             &mut rtcp,
             &mut wtcp,
@@ -153,7 +158,9 @@ impl Connection {
         .map_err(|e| match e {
             SignupMessageError::Read(read_error) => ConnectError::from(read_error),
             SignupMessageError::Write(write_error) => ConnectError::from(write_error),
-        })?;
+        })?
+        .await
+        .unwrap();
         if let Some(code) = NonZero::new(header.status) {
             return Err(ConnectError::handle_error_body(code, &body));
         }
@@ -187,7 +194,7 @@ impl Connection {
     }
     #[allow(clippy::too_many_arguments)]
     async fn signup_message_raw(
-        pending_requests: &mut HashMap<u64, ()>,
+        pending_requests: &mut OutstandingRequests,
         read_tcp: &mut OwnedReadHalf,
         write_tcp: &mut OwnedWriteHalf,
         id: &AtomicU64,
@@ -195,14 +202,16 @@ impl Connection {
         msg: &impl MessageBody,
         add_null: bool,
         incoming_validation: Validation,
-    ) -> Result<(Arc<SyncHeader202Incoming>, Arc<[u8]>), SignupMessageError> {
+    ) -> Result<Receiver<(Arc<[u8]>, Arc<SyncHeader202Incoming>, Arc<[u8]>)>, SignupMessageError>
+    {
         let next_message_id = id.fetch_add(1, Ordering::Relaxed);
         header.message_id = next_message_id;
         let sign_with_key = match incoming_validation {
             Validation::Immediate(k) => k,
             Validation::Delayed(_, _) => None,
         };
-        pending_requests.insert(next_message_id, ());
+        let (sx, rx) = tokio::sync::oneshot::channel();
+        pending_requests.insert(next_message_id, sx);
         let result =
             match message::write_202_message(write_tcp, sign_with_key, header, msg, add_null)
                 .await
@@ -212,9 +221,11 @@ impl Connection {
                     .await
                     .map_err(SignupMessageError::Read),
                 Err(e) => Err(e),
-            };
-        pending_requests.remove(&next_message_id);
-        result
+            }?;
+        if let Some(sender) = pending_requests.remove(&next_message_id) {
+            let _ = sender.send((Arc::default(), result.0, result.1));
+        }
+        Ok(rx)
     }
 }
 

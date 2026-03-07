@@ -84,7 +84,7 @@ impl Session202 {
                 buffer: auth_context.next_token(),
             };
             let (validation, validate) = Validation::setup_delayed();
-            let (header, body) = connection
+            let (_, header, body) = connection
                 .signup_message(header, &body, false, validation)
                 .await
                 .map_err(|su| match su {

@@ -62,7 +62,7 @@ impl FileHandle {
             .then_some(session.session_key())
             .copied();
 
-        let (header, body) = session
+        let (_, header, body) = session
             .connection
             .signup_message(header, &request_body, false, Validation::Immediate(key))
             .await
@@ -118,7 +118,7 @@ impl FileHandle {
             .requires_signing()
             .then_some(session.session_key())
             .copied();
-        let (header, body) = match session
+        let (_, header, body) = match session
             .connection
             .signup_message(
                 header,
@@ -172,7 +172,7 @@ impl FileHandle {
             .requires_signing()
             .then_some(session.session_key())
             .copied();
-        let (header, body) = session
+        let (_, header, body) = session
             .connection
             .signup_message(
                 header,
