@@ -36,6 +36,7 @@ impl Debug for Session202 {
             .field("id", &self.id)
             .field("connection", &self.connection)
             .field("flags", &self.flags)
+            .field("requires_signing", &self.requires_signing)
             .finish()
     }
 }
