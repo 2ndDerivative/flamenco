@@ -1,6 +1,6 @@
 use std::{
     fmt::Debug,
-    io::{Cursor, ErrorKind, SeekFrom},
+    io::{Cursor, SeekFrom},
     num::NonZero,
     sync::Arc,
 };
@@ -12,13 +12,10 @@ use kenobi::{
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::{
-    client::{Connection, GuestPolicy},
+    client::{Connection, GuestPolicy, SignupMessageError},
     error::{ErrorResponse2, ServerError},
     header::{Command202, SyncHeader202Outgoing},
-    message::{
-        MessageBody, ReadError as MsgReadError, Validation, WriteError as MsgWriteError,
-        read_202_message, write_202_message,
-    },
+    message::{MessageBody, ReadError as MsgReadError, Validation, WriteError as MsgWriteError},
     sign::SecurityMode,
     tree::{TreeConnectError, TreeConnection},
 };
@@ -67,14 +64,12 @@ impl Session202 {
         let mut session_id = 0;
         loop {
             let client = &connection.client;
-            let mut connection_lock = connection.inner.lock().await;
-            let message_id = connection.fetch_increment_message_id();
             let header = SyncHeader202Outgoing {
                 command: Command202::SessionSetup,
                 credits: 1,
                 flags: 0,
                 next_command: None,
-                message_id,
+                message_id: 0,
                 tree_id: 0,
                 session_id,
             };
@@ -88,12 +83,14 @@ impl Session202 {
                 previous_session_id: 0,
                 buffer: auth_context.next_token(),
             };
-            write_202_message(connection_lock.stream_mut(), None, header, &body, false).await?;
-            let message_buffer =
-                buffer_for_delayed_validation(connection_lock.stream_mut()).await?;
-            drop(connection_lock);
-            let (header, body) =
-                read_202_message(&mut message_buffer.as_ref(), Validation::Skip).await?;
+            let (validation, validate) = Validation::setup_delayed();
+            let (header, body) = connection
+                .signup_message(header, &body, None, false, validation)
+                .await
+                .map_err(|su| match su {
+                    SignupMessageError::Read(read_error) => SessionSetupError::from(read_error),
+                    SignupMessageError::Write(write_error) => write_error.into(),
+                })?;
             // Lookup session ID
             if let Some(code) = NonZero::new(header.status)
                 && code.get() != ERROR_MORE_PROCESSING_REQUIRED
@@ -110,9 +107,9 @@ impl Session202 {
                         .session_key()
                         .first_chunk::<16>()
                         .ok_or(SessionSetupError::SessionKeyTooShort)?;
-                    let (_, _) =
-                        read_202_message(&mut &*message_buffer, Validation::Key(session_key))
-                            .await?;
+                    validate(session_key)
+                        .await
+                        .expect("side task was dropped")?;
                     if flags == SessionFlags::Guest {
                         match client.guest_policy {
                             GuestPolicy::Disallowed => {
@@ -153,55 +150,32 @@ impl Session202 {
 }
 impl Drop for Session202 {
     fn drop(&mut self) {
-        let message_id = self.connection.fetch_increment_message_id();
         let connection = self.connection.clone();
         let session_id = self.id;
         let requires_signing = self.requires_signing();
         let session_key = self.session_key;
         tokio::spawn(async move {
-            let mut lock = connection.inner.lock().await;
             let logoff_header = SyncHeader202Outgoing {
                 command: Command202::Logoff,
                 credits: 1,
                 flags: 0,
                 next_command: None,
-                message_id,
+                message_id: 0,
                 tree_id: 0,
                 session_id,
             };
             let key = requires_signing.then_some(session_key);
-            let _ = write_202_message(lock.stream_mut(), key, logoff_header, &LogoffRequest, false)
+            let _ = connection
+                .signup_message(
+                    logoff_header,
+                    &LogoffRequest,
+                    key,
+                    false,
+                    Validation::Key(session_key),
+                )
                 .await;
-            let _ = read_202_message(lock.stream_mut(), Validation::Key(session_key)).await;
         });
     }
-}
-
-async fn buffer_for_delayed_validation<R: AsyncReadExt + Unpin>(
-    r: &mut R,
-) -> Result<Box<[u8]>, MsgReadError> {
-    let mut bios_size = [0u8; 4];
-    r.read_exact(&mut bios_size)
-        .await
-        .map_err(MsgReadError::Connection)?;
-    let message_size = match u32::from_be_bytes(bios_size) {
-        0..64 => {
-            return Err(MsgReadError::Connection(std::io::Error::new(
-                ErrorKind::UnexpectedEof,
-                "Not enough data for header",
-            )));
-        }
-        0x0100_0000.. => return Err(MsgReadError::NetBIOS),
-        size => size,
-    };
-    let message_body_size = message_size as usize;
-    let mut message_body_with_netbios = vec![0u8; message_body_size + 4].into_boxed_slice();
-    let (bios, body) = message_body_with_netbios
-        .split_first_chunk_mut::<4>()
-        .unwrap();
-    bios.copy_from_slice(&bios_size);
-    r.read_exact(body).await.map_err(MsgReadError::Connection)?;
-    Ok(message_body_with_netbios)
 }
 
 #[derive(Debug)]

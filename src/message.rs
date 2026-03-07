@@ -1,11 +1,15 @@
 use std::{
     fmt::Debug,
     io::{Error as IoError, ErrorKind},
+    sync::Arc,
 };
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    sync::oneshot::{Receiver, Sender},
+};
 
 const STATUS_PENDING: u32 = 0x00000103;
 
@@ -15,7 +19,7 @@ use crate::header::{FLAG_SIGNED, SyncHeader202Incoming, SyncHeader202Outgoing};
 pub async fn read_202_message<R: AsyncRead + Unpin>(
     r: &mut R,
     validation: Validation,
-) -> Result<(SyncHeader202Incoming, Box<[u8]>), ReadError> {
+) -> Result<(Arc<SyncHeader202Incoming>, Arc<[u8]>), ReadError> {
     let mut bios_size = [0u8; 4];
     r.read_exact(&mut bios_size)
         .await
@@ -36,44 +40,80 @@ pub async fn read_202_message<R: AsyncRead + Unpin>(
         .map_err(ReadError::Connection)?;
     let header = SyncHeader202Incoming::from_bytes(&header_bytes).unwrap();
     let message_body_size = (message_size - 64) as usize;
-    let mut message_body = vec![0u8; message_body_size].into_boxed_slice();
+    let mut message_body = vec![0u8; message_body_size];
     r.read_exact(&mut message_body)
         .await
         .map_err(ReadError::Connection)?;
+    let message_body = Arc::from(message_body);
     let is_signed = header.flags & FLAG_SIGNED != 0;
+    let arced = Arc::new(header);
     match validation {
-        Validation::Skip => Ok((header, message_body)),
-        Validation::Key(key) => {
-            if header.message_id != u64::MAX && header.status != STATUS_PENDING {
-                if !is_signed {
-                    Err(ReadError::NotSigned)
-                } else if validate_signature(
-                    &key,
-                    &header.signature,
-                    &mut header_bytes,
-                    &message_body,
-                ) {
-                    Ok((header, message_body))
-                } else {
-                    Err(ReadError::InvalidSignature)
-                }
-            } else {
-                Ok((header, message_body))
-            }
+        Validation::Key(key) => validate_to_error(&arced, &key, &mut header_bytes, &message_body)
+            .map(|()| (arced, message_body)),
+        Validation::ExpectNone if !is_signed && arced.signature == [0u8; 16] => {
+            Ok((arced, message_body))
         }
-        Validation::ExpectNone if !is_signed && header.signature == [0u8; 16] => {
-            Ok((header, message_body))
+        Validation::Delayed(incoming_key, outgoing_ok) => {
+            let retained_body = message_body.clone();
+            let arced2 = arced.clone();
+            tokio::spawn(async move {
+                let _ = outgoing_ok.send(
+                    async move {
+                        let key = incoming_key
+                            .await
+                            .expect("dropped promised validation handle!");
+                        validate_to_error(&arced2, &key, &mut header_bytes, &retained_body)
+                    }
+                    .await,
+                );
+            });
+            Ok((arced, message_body))
         }
         Validation::ExpectNone => Err(ReadError::InvalidlySignedMessage),
     }
 }
 
+fn validate_to_error(
+    header: &SyncHeader202Incoming,
+    key: &[u8; 16],
+    header_bytes: &mut [u8],
+    body_bytes: &[u8],
+) -> Result<(), ReadError> {
+    let is_signed = header.flags & FLAG_SIGNED != 0;
+    if header.message_id != u64::MAX && header.status != STATUS_PENDING {
+        if !is_signed {
+            Err(ReadError::NotSigned)
+        } else if validate_signature(key, &header.signature, header_bytes, body_bytes) {
+            Ok(())
+        } else {
+            Err(ReadError::InvalidSignature)
+        }
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Debug, Default)]
 pub enum Validation {
-    Skip,
     #[default]
     ExpectNone,
     Key([u8; 16]),
+    Delayed(Receiver<[u8; 16]>, Sender<Result<(), ReadError>>),
+}
+impl Validation {
+    pub fn setup_delayed() -> (
+        Self,
+        impl FnOnce([u8; 16]) -> Receiver<Result<(), ReadError>>,
+    ) {
+        let (future_key_in, rx) = tokio::sync::oneshot::channel();
+        let (sx, message_is_okay) = tokio::sync::oneshot::channel();
+        (Validation::Delayed(rx, sx), |key| {
+            future_key_in
+                .send(key)
+                .expect("validation side channel closed");
+            message_is_okay
+        })
+    }
 }
 impl From<Option<[u8; 16]>> for Validation {
     fn from(value: Option<[u8; 16]>) -> Self {

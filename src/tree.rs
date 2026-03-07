@@ -11,9 +11,7 @@ use crate::{
     error::{ErrorResponse2, ServerError},
     file::{FileHandle, OpenError},
     header::{Command202, SyncHeader202Outgoing},
-    message::{
-        MessageBody, Validation, WriteError as MsgWriteError, read_202_message, write_202_message,
-    },
+    message::{MessageBody, ReadError as MsgReadError, Validation, WriteError as MsgWriteError},
     session::Session202,
     share_name::{InvalidShareName, ShareName},
 };
@@ -39,19 +37,24 @@ impl TreeConnection {
         if let Err(e) = parse_share_path(path) {
             return Err(TreeConnectError::InvalidPath(e));
         };
-        let mut lock = session.connection.inner.lock().await;
-        write_202_message(
-            lock.stream_mut(),
-            session_key,
-            tc_header,
-            &TreeConnectRequest(path),
-            false,
-        )
-        .await?;
-        let (header, msg) = read_202_message(lock.stream_mut(), Validation::from(session_key))
+        let (header, msg) = session
+            .connection
+            .signup_message(
+                tc_header,
+                &TreeConnectRequest(path),
+                session_key,
+                false,
+                Validation::from(session_key),
+            )
             .await
-            .unwrap();
-        drop(lock);
+            .map_err(|e| match e {
+                crate::client::SignupMessageError::Read(read_error) => {
+                    TreeConnectError::from(read_error)
+                }
+                crate::client::SignupMessageError::Write(write_error) => {
+                    TreeConnectError::from(write_error)
+                }
+            })?;
         if let Some(code) = NonZero::new(header.status) {
             return Err(ServerError::handle_error_body(code, &msg));
         }
@@ -84,17 +87,16 @@ impl Drop for TreeConnection {
         let key = session.requires_signing().then_some(*session.session_key());
         let header = SyncHeader202Outgoing::from_tree_con(self, Command202::TreeDisconnect);
         tokio::spawn(async move {
-            let mut lock = session.connection.inner.lock().await;
-            let _ = write_202_message(
-                lock.stream_mut(),
-                key,
-                header,
-                &TreeDisconnectRequest,
-                false,
-            )
-            .await;
-            let Ok((_header, body)) =
-                read_202_message(lock.stream_mut(), Validation::from(key)).await
+            let Ok((_header, body)) = session
+                .connection
+                .signup_message(
+                    header,
+                    &TreeDisconnectRequest,
+                    key,
+                    false,
+                    Validation::from(key),
+                )
+                .await
             else {
                 return;
             };
@@ -126,6 +128,17 @@ impl From<MsgWriteError> for TreeConnectError {
         match value {
             MsgWriteError::Connection(io) => Self::Io(io),
             MsgWriteError::MessageTooLong => unreachable!("share path limit already enforces this"),
+        }
+    }
+}
+impl From<MsgReadError> for TreeConnectError {
+    fn from(value: MsgReadError) -> Self {
+        match value {
+            MsgReadError::NetBIOS
+            | MsgReadError::NotSigned
+            | MsgReadError::InvalidSignature
+            | MsgReadError::InvalidlySignedMessage => Self::InvalidMessage,
+            MsgReadError::Connection(error) => Self::Io(error),
         }
     }
 }

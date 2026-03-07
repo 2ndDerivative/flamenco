@@ -19,7 +19,6 @@ pub struct SyncHeader202Outgoing {
 }
 impl SyncHeader202Outgoing {
     pub fn from_session(session: &Session202, command: Command202) -> Self {
-        let message_id = session.connection.fetch_increment_message_id();
         Self {
             command,
             credits: 1,
@@ -29,7 +28,7 @@ impl SyncHeader202Outgoing {
                 0
             },
             next_command: None,
-            message_id,
+            message_id: 0,
             tree_id: 0,
             session_id: session.id,
         }

@@ -10,16 +10,14 @@ use std::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 use crate::{
+    client::SignupMessageError,
     error::{ErrorResponse2, ServerError},
     file::{
         close::{CloseRequest, CloseResponse},
         read::{ReadFileError, ReadRequest, ReadResponse, ReadResponseError},
     },
     header::{Command202, SyncHeader202Outgoing},
-    message::{
-        MessageBody, ReadError as MsgReadError, Validation, WriteError, read_202_message,
-        write_202_message,
-    },
+    message::{MessageBody, ReadError as MsgReadError, Validation, WriteError},
     tree::TreeConnection,
 };
 
@@ -63,14 +61,24 @@ impl FileHandle {
             .requires_signing()
             .then_some(session.session_key())
             .copied();
-        let mut lock = session.connection.inner.lock().await;
-        write_202_message(lock.stream_mut(), key, header, &request_body, false)
+
+        let (header, body) = session
+            .connection
+            .signup_message(header, &request_body, key, false, Validation::from(key))
             .await
-            .unwrap();
-        let (header, body) = read_202_message(lock.stream_mut(), Validation::from(key))
-            .await
-            .unwrap();
-        drop(lock);
+            .map_err(|e| match e {
+                SignupMessageError::Read(read_error) => match read_error {
+                    MsgReadError::NetBIOS
+                    | MsgReadError::NotSigned
+                    | MsgReadError::InvalidSignature
+                    | MsgReadError::InvalidlySignedMessage => OpenError::InvalidMessage,
+                    MsgReadError::Connection(error) => OpenError::Io(error),
+                },
+                SignupMessageError::Write(write_error) => match write_error {
+                    WriteError::Connection(error) => OpenError::Io(error),
+                    WriteError::MessageTooLong => OpenError::InvalidMessage,
+                },
+            })?;
         if let Some(code) = NonZero::new(header.status) {
             return Err(ServerError::handle_error_body(code, &body));
         }
@@ -110,34 +118,39 @@ impl FileHandle {
             .requires_signing()
             .then_some(session.session_key())
             .copied();
-        let mut lock = session.connection.inner.lock().await;
-        write_202_message(
-            lock.stream_mut(),
-            key,
-            header,
-            &ReadRequest {
-                length,
-                offset: self.offset,
-                id: self.id,
-                minimum_count,
-            },
-            true,
-        )
-        .await
-        .map_err(|e| match e {
-            WriteError::Connection(io) => ReadFileError::Io(io),
-            WriteError::MessageTooLong => ReadFileError::InvalidMessage,
-        })?;
-        let (header, body) = read_202_message(lock.stream_mut(), Validation::from(key))
+        let (header, body) = match session
+            .connection
+            .signup_message(
+                header,
+                &ReadRequest {
+                    length,
+                    offset: self.offset,
+                    id: self.id,
+                    minimum_count,
+                },
+                key,
+                true,
+                Validation::from(key),
+            )
             .await
-            .map_err(|e| match e {
-                MsgReadError::NetBIOS
-                | MsgReadError::NotSigned
-                | MsgReadError::InvalidSignature
-                | MsgReadError::InvalidlySignedMessage => ReadFileError::InvalidMessage,
-                MsgReadError::Connection(io) => ReadFileError::Io(io),
-            })?;
-        drop(lock);
+        {
+            Ok(ok) => ok,
+            Err(SignupMessageError::Read(r)) => {
+                return Err(match r {
+                    MsgReadError::NetBIOS
+                    | MsgReadError::NotSigned
+                    | MsgReadError::InvalidSignature
+                    | MsgReadError::InvalidlySignedMessage => ReadFileError::InvalidMessage,
+                    MsgReadError::Connection(io) => ReadFileError::Io(io),
+                });
+            }
+            Err(SignupMessageError::Write(w)) => {
+                return Err(match w {
+                    WriteError::Connection(error) => ReadFileError::Io(error),
+                    WriteError::MessageTooLong => ReadFileError::InvalidMessage,
+                });
+            }
+        };
         if let Some(code) = NonZero::new(header.status) {
             return Err(ServerError::handle_error_body(code, &body));
         }
@@ -160,20 +173,17 @@ impl FileHandle {
             .requires_signing()
             .then_some(session.session_key())
             .copied();
-        let mut lock = session.connection.inner.lock().await;
-        write_202_message(
-            lock.stream_mut(),
-            session_key,
-            header,
-            &CloseRequest { id },
-            false,
-        )
-        .await
-        .unwrap();
-        let (header, body) = read_202_message(lock.stream_mut(), Validation::from(session_key))
+        let (header, body) = session
+            .connection
+            .signup_message(
+                header,
+                &CloseRequest { id },
+                session_key,
+                false,
+                Validation::from(session_key),
+            )
             .await
             .unwrap();
-        drop(lock);
         if let Some(code) = NonZero::new(header.status) {
             panic!("Error with code {code}");
         }
